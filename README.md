@@ -11,7 +11,7 @@ there and can explain.
 | Layer | | |
 |-------|---|---|
 | 1. Pager | ✅ | pages, allocation, free list, fsync |
-| 2. Buffer pool | ⬜ | |
+| 2. Buffer pool | ✅ | frames, pin/unpin, dirty write-back, clock eviction |
 | 3. Records | ⬜ | |
 | 4. B+Tree | ⬜ | |
 | 5. WAL / recovery | ⬜ | |

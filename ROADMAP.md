@@ -11,15 +11,19 @@ One file becomes an array of 4 KB pages. Allocate, free, read, write, fsync.
 - Code: `pydb/pager.py` · Tests: `tests/test_pager.py` · Format: `NOTES.md`
 - **Milestone (met):** write a page, kill the process, reopen, data is intact.
 
-## Layer 2 — Buffer pool
+## Layer 2 — Buffer pool ✅
 
 Pages stop being copied off disk on every read and start living in memory.
 
-- Frame table, `pin` / `unpin`, dirty flags, LRU (or clock) eviction.
+- Code: `pydb/buffer_pool.py` · Tests: `tests/test_buffer_pool.py`
+- Frame table, `pin` / `unpin`, dirty flags, clock (second-chance) eviction.
 - Nothing above this layer calls `Pager.read_page` directly any more.
-- **Milestone:** operate on a 100 MB file with a 50-frame pool, correct results,
-  and an eviction counter proving pages really were flushed and re-read.
+- **Milestone (met):** a 100 MB file through a 50-frame pool, every page read
+  back correctly, with an eviction counter proving the pages really were
+  flushed and re-read.
 - **Trap:** evicting a pinned page. Pin counts are the whole point; assert on them.
+- **Also bit me:** `page[:3] = b"oops"` *resizes* a `bytearray`. `unpin_page`
+  now rejects a frame whose length changed.
 
 ## Layer 3 — Records
 
