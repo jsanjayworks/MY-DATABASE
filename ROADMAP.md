@@ -117,17 +117,79 @@ stopped.
 - **Cost, stated plainly:** no two transactions ever run at once, readers
   included.
 
-## Layer 7 — SQL
+## Layer 7 — SQL ✅
 
-- Tokenizer → parser → AST → planner → executor, plus a REPL and a catalog
-  table describing the user's tables.
-- Start with exactly: `CREATE TABLE`, `INSERT`, `SELECT ... WHERE`. Add `ORDER
-  BY`, joins, and aggregates only after those work end to end.
-- **Milestone:** a REPL session that creates a table, inserts rows, restarts the
-  process, and queries them back.
+- Code: `pydb/catalog.py`, `pydb/sql/` (`tokenizer`, `nodes`, `parser`, `planner`,
+  `engine`), `pydb/repl.py` ·
+  Tests: `tests/test_catalog.py`, `tests/test_sql.py`, `tests/test_repl.py`
+- Tokenizer → parser → AST → planner → executor, a REPL (`python -m pydb my.db`),
+  and a catalog stored in the database it describes.
+- Started with exactly `CREATE TABLE`, `INSERT`, `SELECT ... WHERE`, then added
+  `ORDER BY`, `LIMIT`/`OFFSET`, `UPDATE`, `DELETE`, `DROP TABLE` and
+  `BEGIN`/`COMMIT`/`ROLLBACK` once those worked end to end. No joins, no
+  aggregates.
+- **Milestone (met):** `python -m pydb` run three times over one file — create and
+  insert, restart and query, restart and modify. Also 1000 rows inserted in one
+  transaction through the REPL and read back by a second process.
+- **Where layer 4 pays off:** a `PRIMARY KEY` gets a B+Tree index, and the planner
+  uses it for `=` (an index lookup) and for `<` `<=` `>` `>=` (an index range),
+  including when the condition is one half of an `AND`. An `OR` falls back to a
+  scan, because the index would miss the rows matching its other half. Measured on
+  a 4000-row table with a 16-frame pool: **1 page read through the index, 30 for
+  the equivalent scan.**
+- **Worth knowing about `WHERE`:** comparisons use SQL's three-valued logic, so a
+  row whose column is NULL satisfies neither `age = 41` nor `age != 41`. There is a
+  test asserting exactly that, because it looks like a bug until you remember it
+  is the specification.
+- **What it caught:** `Table.verify()` — the counterpart to the tree's invariant
+  check — asserts the heap and the index agree about every row. An insert that
+  updates one and not the other gives a table that answers the same query
+  differently depending on which plan runs, which is close to undiagnosable any
+  other way.
+
+## Where this stops
+
+The seven layers are done. The honest list of what a real database has that this
+one does not:
+
+- **Overflow pages.** A row is capped at 4080 bytes and a tree value at ~496.
+- **Real isolation.** One global lock, so no two transactions ever overlap. 2PL or
+  MVCC needs a thread-safe buffer pool first.
+- **Undo logging.** Redo only, which is why an uncommitted page may not be evicted
+  and a transaction cannot outgrow the buffer pool.
+- **Joins and aggregates.** One table per query.
+- **A vacuum.** `DROP TABLE` leaks the table's pages; so does a crash in the narrow
+  window after a commit fsync.
+- **A query optimiser.** The planner picks an index when it can and scans
+  otherwise. No statistics, no cost model, no join ordering — there being no
+  joins.
 
 ## Ordering advice
 
 Build a throwaway vertical slice early — insert one hard-coded row through a
 fake "SQL" call and read it back — so you have seen the whole path work before
 you invest weeks in any single layer.
+
+## What the layers taught, in one place
+
+Bottom-up was right, and the reason is narrower than "it is tidy": **every bug
+found in an upper layer turned out to live in a lower one**, and it was findable
+because the lower one was already trusted.
+
+- The buffer pool had a frame that `free_page` emptied without returning it to the
+  free list. Nothing freed pages until layer 4 did, and the symptom appeared in
+  eviction, pages away from the cause.
+- The B+Tree's fill invariant was violated by *correct* code, because
+  `MAX_CELL_SIZE` and `MIN_USED` had been chosen independently when they are a
+  pair. Writing the invariant down as an assertion is what turned that from a
+  vague unease into arithmetic.
+- Layer 5 found three places where a write was reaching the data file without a log
+  record in front of it — and all three were in layers 1 and 2, which had looked
+  finished for days.
+- Layers 6 and 7 found the same class of bug three times: **after a rollback,
+  anything derived from the file has to be derived again.** A cached root page id,
+  a cached page chain, a cached table definition.
+
+The two habits that paid for themselves many times over: an invariant checker per
+structure, called after every mutation in tests, and closing the file and reopening
+it in any test that claims something was stored.

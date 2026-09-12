@@ -30,7 +30,7 @@ from __future__ import annotations
 import os
 import threading
 from contextlib import contextmanager
-from typing import Iterator
+from typing import Callable, Iterator
 
 from pydb.btree import BTree
 from pydb.buffer_pool import DEFAULT_CAPACITY, BufferPool
@@ -76,6 +76,7 @@ class Database:
         self._lock = threading.Lock()
         self._owner: int | None = None  # thread id inside the transaction
         self._trees: dict[int, BTree] = {}  # meta slot -> the tree rooted there
+        self._rollback_hooks: list[Callable[[], None]] = []
         self._closed = False
 
     # ------------------------------------------------------------------
@@ -142,6 +143,8 @@ class Database:
         try:
             self.wal.rollback()
             self._resync_trees()
+            for hook in self._rollback_hooks:
+                hook()
             self.rollbacks += 1
         finally:
             self._release()
@@ -216,6 +219,15 @@ class Database:
     # ------------------------------------------------------------------
     # internals
     # ------------------------------------------------------------------
+
+    def add_rollback_hook(self, hook: Callable[[], None]) -> None:
+        """Register something to run after every rollback.
+
+        Anything above this layer that caches a page id -- a table's index root, a
+        heap's page chain -- is holding a value a rollback can invalidate, and has
+        to re-read it from the file. This is where it gets told to.
+        """
+        self._rollback_hooks.append(hook)
 
     def _resync_trees(self) -> None:
         """Point every open tree back at the root the rollback restored.

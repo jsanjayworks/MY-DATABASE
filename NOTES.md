@@ -276,6 +276,52 @@ is that **a page freed by a transaction can leak** if the crash lands in the
 narrow window after the commit fsync — the page is unreachable and unreclaimed,
 which costs space and never correctness.
 
+## The catalog (layer 7)
+
+A database describes itself. Table definitions are rows in a B+Tree whose root
+lives in **meta slot 0**, keyed by the table name (UTF-8, so the names come back
+sorted) with this as the value:
+
+| Offset | Type | Field |
+|--------|------|-------|
+| 0  | `I` | first page of the row heap |
+| 4  | `I` | root page of the primary key index, 0 if there is none |
+| 8  | `h` | primary key column index, −1 if there is none |
+| 10 | `H` | column count |
+| 12 | ... | per column: `>H` name length, UTF-8 name, `>B` type, `>B` nullable |
+
+Consequences of putting it in a tree value, which is capped at ~496 bytes:
+
+- **about 24 columns per table**, depending on how long the names are. A real
+  database spills the definition across several rows; this one does not.
+- the index root is recorded *here*, not in a meta slot, because there is one per
+  table. When a table's index splits its root, the tree's `on_root_change` writes
+  the new page id back into this record — inside the same transaction, so a
+  rollback takes it back.
+
+### Dropping a table leaks its pages
+
+`DROP TABLE` removes the catalog row and stops there. Freeing every page of the
+heap and the index is easy to write and wrong to do in one transaction: layer 5
+caps a transaction at the size of the buffer pool, and a large table has far more
+pages than that. Doing it properly means freeing in batches across several
+transactions, which is a vacuum, not a drop.
+
+### Three caches a rollback can invalidate
+
+This one cost real debugging time. A rolled-back transaction restores the file,
+but in-memory state derived from it is left describing pages that may no longer
+exist:
+
+1. a `BTree`'s `root_page_id`, which a split may have moved;
+2. a `HeapFile`'s page chain and free-space map, which an append may have grown;
+3. a cached `TableInfo`, holding both of the above.
+
+So `Database.rollback` re-reads the root from its meta slot and calls every
+registered rollback hook, and the catalog's hook re-reads each open table. The
+rule that falls out of it: **after a rollback, anything derived from the file has
+to be derived again.**
+
 ## Durability
 
 `page_count` and `free_list_head` live on the meta page, so every allocate and

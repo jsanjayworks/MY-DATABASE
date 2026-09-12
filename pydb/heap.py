@@ -198,6 +198,18 @@ class HeapFile:
                 self._note_room(page_id, page)
         return reclaimed
 
+    def reload(self) -> None:
+        """Re-read the page chain from the file, dropping cached bookkeeping.
+
+        The chain and the free-space map are in-memory conclusions about the
+        file's contents, so a rolled-back transaction can leave them describing
+        pages that no longer exist. Rebuilding beats patching.
+        """
+        self._pages.clear()
+        self._page_set.clear()
+        self._room.clear()
+        self._load_chain()
+
     def verify(self) -> None:
         """Check every page's invariants and that the chain matches what's cached."""
         chain: list[int] = []
