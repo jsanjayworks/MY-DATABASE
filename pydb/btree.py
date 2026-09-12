@@ -176,6 +176,25 @@ class BTree:
                 page_id = node.next_leaf
         return total
 
+    def all_pages(self) -> list[int]:
+        """Every page this tree occupies, so a caller can free them.
+
+        Walks the whole tree, which is the point: there is no page list to consult,
+        because the tree's structure *is* the list.
+        """
+        pages: list[int] = []
+        pending = [self.root_page_id]
+        while pending:
+            page_id = pending.pop()
+            pages.append(page_id)
+            with self.pool.pinned(page_id) as data:
+                node = Node(data, page_id)
+                if node.is_internal:
+                    pending.extend(
+                        node.child_at(index) for index in range(node.cell_count + 1)
+                    )
+        return pages
+
     def height(self) -> int:
         """1 for a tree that is just a leaf, 2 once it has a root above leaves."""
         levels = 1

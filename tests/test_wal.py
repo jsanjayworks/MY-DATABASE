@@ -266,6 +266,47 @@ class TestRollback(WalTestCase):
         with pool.pinned(page_id) as page:
             self.assertEqual(bytes(page[:4]), b"live", "the page was never clobbered")
 
+    def test_a_freed_page_can_be_allocated_again_after_the_commit(self):
+        """Committing a free has to drop the page from the pool as well.
+
+        It did not, once: the page went on the pager's free list while its old
+        frame stayed cached, so the next allocation handed out a page id the pool
+        still held. Nothing noticed until something freed pages in bulk.
+        """
+        pool, wal = self.open_db()
+        first, page = pool.new_page()
+        page[:4] = b"gone"
+        pool.unpin_page(first, dirty=True)
+        wal.commit()
+
+        pool.free_page(first)
+        wal.commit()
+        self.assertEqual(pool.pager.free_pages(), [first])
+        self.assertNotIn(first, pool.resident_pages())
+
+        again, page = pool.new_page()
+        self.assertEqual(again, first, "the freed page should be reused")
+        self.assertEqual(bytes(page[:4]), bytes(4), "and it should come back zeroed")
+        pool.unpin_page(again, dirty=True)
+        wal.commit()
+
+    def test_freeing_many_pages_across_batched_transactions(self):
+        pool, wal = self.open_db(capacity=8)
+        pages = []
+        for _ in range(40):
+            page_id, page = pool.new_page()
+            page[:2] = b"xx"
+            pool.unpin_page(page_id, dirty=True)
+            pages.append(page_id)
+            wal.commit()
+
+        for start in range(0, len(pages), 4):  # small batches, as Database does
+            for page_id in pages[start : start + 4]:
+                pool.free_page(page_id)
+            wal.commit()
+        self.assertEqual(sorted(pool.pager.free_pages()), sorted(pages))
+        self.assertEqual(pool.resident_pages(), [])
+
     def test_rollback_undoes_a_meta_slot_write(self):
         """The B+Tree root lives in a meta slot, so "the root moved" has to be a
         change a rollback can take back like any other."""

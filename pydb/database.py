@@ -211,6 +211,34 @@ class Database:
         self._trees[slot] = tree
         return tree
 
+    def free_pages(self, pages: list[int]) -> int:
+        """Return many pages to the pager, in batches. Returns how many.
+
+        Freeing a page dirties it -- the free-list link is written into it -- so
+        freeing a big table's worth in one transaction would hit the buffer pool's
+        no-steal limit. Each batch is its own transaction, which means a crash
+        part-way through leaves the remainder unreclaimed: a space leak, never a
+        correctness problem, and the reason this is a `VACUUM`-shaped operation
+        rather than part of `DROP TABLE`.
+
+        Inside an open transaction it does them all at once, because splitting a
+        caller's transaction would be worse than the risk.
+        """
+        self._require_open()
+        if self.in_transaction:
+            for page_id in pages:
+                self.pool.free_page(page_id)
+            return len(pages)
+
+        batch = max(1, self.pool.capacity // 2)
+        freed = 0
+        for start in range(0, len(pages), batch):
+            with self.transaction():
+                for page_id in pages[start : start + batch]:
+                    self.pool.free_page(page_id)
+                    freed += 1
+        return freed
+
     def checkpoint(self) -> int:
         """Bring the data file fully up to date and empty the log."""
         self._require_open()

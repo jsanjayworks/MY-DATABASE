@@ -37,13 +37,20 @@ HELP = """\
 Statements end with a semicolon and may span lines.
 
   .tables              list the tables in this database
-  .schema [table]      show the CREATE TABLE for one table, or all of them
+  .indexes [table]     list the indexes, or just one table's
+  .schema [table]      show the CREATE statements for one table, or all of them
   .plan [on|off]       show the access path chosen for each query
   .help                this text
   .quit, .exit         leave (Ctrl-D also works)
 
-Supported SQL: CREATE TABLE, DROP TABLE, INSERT, SELECT (WHERE, ORDER BY, LIMIT,
-OFFSET), UPDATE, DELETE, BEGIN, COMMIT, ROLLBACK. Types are INT and TEXT."""
+Supported SQL:
+  CREATE TABLE / DROP TABLE / CREATE [UNIQUE] INDEX / DROP INDEX
+  INSERT / UPDATE / DELETE / VACUUM
+  SELECT [DISTINCT] with WHERE, JOIN (INNER, LEFT, CROSS), GROUP BY, HAVING,
+         ORDER BY, LIMIT / OFFSET, and COUNT / SUM / AVG / MIN / MAX
+  BEGIN / COMMIT / ROLLBACK, and EXPLAIN in front of any query
+
+Types are INT and TEXT. Prefix any statement with EXPLAIN to see its plan."""
 
 
 class Repl:
@@ -145,6 +152,9 @@ class Repl:
             names = self.engine.catalog.table_names()
             self._write(("\n".join(names) if names else "no tables") + "\n")
             return False
+        if name == ".indexes":
+            self._indexes(arguments)
+            return False
         if name == ".schema":
             self._schema(arguments)
             return False
@@ -167,6 +177,21 @@ class Repl:
             return
         for name in names:
             self._write(describe_table(catalog.info(name)) + "\n")
+
+    def _indexes(self, arguments: list[str]) -> None:
+        catalog = self.engine.catalog
+        lines = []
+        for name in arguments or catalog.table_names():
+            info = catalog.info(name)
+            for index in info.indexes:
+                kind = (
+                    "primary key"
+                    if index.primary
+                    else ("unique" if index.unique else "index")
+                )
+                column = info.schema.columns[index.column].name
+                lines.append(f"{index.name}  {kind} on {name}({column})")
+        self._write(("\n".join(lines) if lines else "no indexes") + "\n")
 
     # ------------------------------------------------------------------
     # output
@@ -217,7 +242,7 @@ def _split_statement(buffer: str) -> tuple[str | None, str]:
 
 
 def describe_table(info) -> str:
-    """A `CREATE TABLE` statement that would rebuild this table."""
+    """The `CREATE` statements that would rebuild this table and its indexes."""
     parts = []
     for column in info.schema:
         piece = f"{column.name} {column.type}"
@@ -226,7 +251,14 @@ def describe_table(info) -> str:
         elif not column.nullable:
             piece += " NOT NULL"
         parts.append(piece)
-    return f"CREATE TABLE {info.name} (\n  " + ",\n  ".join(parts) + "\n);"
+    lines = [f"CREATE TABLE {info.name} (\n  " + ",\n  ".join(parts) + "\n);"]
+    for index in info.indexes:
+        if index.primary:
+            continue  # already shown as PRIMARY KEY above
+        unique = "UNIQUE " if index.unique else ""
+        column = info.schema.columns[index.column].name
+        lines.append(f"CREATE {unique}INDEX {index.name} ON {info.name}({column});")
+    return "\n".join(lines)
 
 
 def format_table(result: Result) -> str:

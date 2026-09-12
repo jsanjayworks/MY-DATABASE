@@ -25,6 +25,7 @@ from pydb.btree import DuplicateKeyError  # noqa: E402
 from pydb.catalog import (  # noqa: E402
     Catalog,
     CatalogError,
+    IndexInfo,
     TableExistsError,
     TableInfo,
     UnknownTableError,
@@ -57,9 +58,37 @@ class CatalogTestCase(unittest.TestCase):
 
 class TestTableInfoEncoding(unittest.TestCase):
     def test_round_trips(self):
-        info = TableInfo("people", PEOPLE, first_page_id=7, primary_key=0, index_root=9)
+        info = TableInfo(
+            "people",
+            PEOPLE,
+            first_page_id=7,
+            indexes=[IndexInfo("people_pkey", 0, unique=True, primary=True, root=9)],
+        )
         decoded = TableInfo.decode("people", info.encode())
         self.assertEqual(decoded, info)
+
+    def test_round_trips_several_indexes(self):
+        info = TableInfo(
+            "people",
+            PEOPLE,
+            first_page_id=7,
+            indexes=[
+                IndexInfo("people_pkey", 0, unique=True, primary=True, root=9),
+                IndexInfo("by_name", 1, unique=True, root=11),
+                IndexInfo("by_age", 2, root=13),
+            ],
+        )
+        decoded = TableInfo.decode("people", info.encode())
+        self.assertEqual(decoded, info)
+        self.assertEqual(decoded.primary_key_name, "id")
+        self.assertEqual([i.name for i in decoded.indexes_on(2)], ["by_age"])
+
+    def test_a_definition_too_big_for_a_catalog_row_is_refused(self):
+        from pydb.record import Schema
+
+        wide = Schema.of(*[(f"column_with_a_long_name_{i}", "INT") for i in range(60)])
+        with self.assertRaises(CatalogError):
+            TableInfo("wide", wide, first_page_id=1).encode()
 
     def test_round_trips_without_a_primary_key(self):
         info = TableInfo("logs", PEOPLE, first_page_id=3)
@@ -73,7 +102,9 @@ class TestTableInfoEncoding(unittest.TestCase):
         self.assertEqual(TableInfo.decode("t", info.encode()).schema, schema)
 
     def test_primary_key_name_comes_from_the_column_index(self):
-        info = TableInfo("people", PEOPLE, first_page_id=1, primary_key=1)
+        info = TableInfo(
+            "people", PEOPLE, 1, [IndexInfo("k", 1, unique=True, primary=True)]
+        )
         self.assertEqual(info.primary_key_name, "name")
         self.assertIsNone(TableInfo("x", PEOPLE, 1).primary_key_name)
 
@@ -200,16 +231,16 @@ class TestRows(CatalogTestCase):
 
     def test_an_index_range_reads_rows_in_key_order(self):
         self.insert_many(100)
-        from pydb.record import ColumnType, encode_key
-
-        low = encode_key(ColumnType.INT, 10)
-        high = encode_key(ColumnType.INT, 20)
-        keys = [values[0] for _rid, values in self.table.index_range(low, high)]
-        self.assertEqual(keys, list(range(10, 20)))
+        index = self.table.primary_index
+        low = index.bound_above(10, inclusive=True)
+        high = index.bound_below(20, inclusive=False)
+        rows = self.table.rows_for(index.scan(low, high))
+        self.assertEqual([values[0] for _rid, values in rows], list(range(10, 20)))
 
     def test_a_table_without_a_primary_key_has_no_index(self):
         logs = self.catalog.create_table("logs", Schema.of(("line", "TEXT")))
-        self.assertIsNone(logs.index)
+        self.assertEqual(logs.indexes, [])
+        self.assertIsNone(logs.primary_index)
         with self.db.transaction():
             logs.insert(("first",))
             logs.insert(("second",))
@@ -258,7 +289,7 @@ class TestRollback(CatalogTestCase):
         with self.db.transaction():
             for i in range(200):
                 table.insert((i, f"name-{i}", i))
-        root_before = table.index.root_page_id
+        root_before = table.primary_index.tree.root_page_id
 
         with self.assertRaises(RuntimeError):
             with self.db.transaction():
@@ -266,8 +297,10 @@ class TestRollback(CatalogTestCase):
                     table.insert((i, f"name-{i}", i))
                 raise RuntimeError
 
-        self.assertEqual(table.index.root_page_id, root_before)
-        self.assertEqual(self.catalog.info("people").index_root, root_before)
+        self.assertEqual(table.primary_index.tree.root_page_id, root_before)
+        self.assertEqual(
+            self.catalog.info("people").primary_index.root, root_before
+        )
         table.verify()
         self.assertEqual(len(list(table.scan())), 200)
 

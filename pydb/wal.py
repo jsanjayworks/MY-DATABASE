@@ -201,7 +201,7 @@ class Wal:
         if not self.in_transaction:
             return self.last_commit_lsn
 
-        self._apply_frees()
+        freed = self._apply_frees()
         pages = list(self._dirty)
         if self.pager.flush_meta_pending:
             # The meta page holds the page count and the free list, so an
@@ -220,6 +220,13 @@ class Wal:
             if page_id != META_PAGE_ID:
                 self.pool.flush_page(page_id)
         self.pager.flush_meta()
+        # A freed page is on the pager's free list now, so the pager may hand it
+        # out again -- and it must not still be sitting in the pool when that
+        # happens, or two ideas of the same page id would exist at once. The
+        # discard has to come *after* the flush above, because the free-list link
+        # written into it is part of this commit.
+        for page_id in freed:
+            self.pool.discard_page(page_id)
         self._meta_before = self.pager.meta_state()
 
         self.last_commit_lsn = commit_lsn
@@ -383,14 +390,20 @@ class Wal:
         self._file.flush()
         os.fsync(self._file.fileno())
 
-    def _apply_frees(self) -> None:
-        """Turn staged frees into page images, in memory, before anything is logged."""
-        for page_id in self._frees:
+    def _apply_frees(self) -> list[int]:
+        """Turn staged frees into page images, in memory, before anything is logged.
+
+        Returns the pages freed, so the caller can drop them from the pool once
+        their new contents have been written.
+        """
+        freed = list(self._frees)
+        for page_id in freed:
             data = self.pool.fetch_page(page_id)
             try:
                 self.pager.stage_free(page_id, data)
             finally:
                 self.pool.unpin_page(page_id, dirty=True)
+        return freed
 
     def _require_open(self) -> None:
         if self._file is None:

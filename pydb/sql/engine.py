@@ -1,18 +1,18 @@
 """Layer 7f: the engine.
 
 The front door: text in, `Result` out. Everything below has been built so that
-this file can be short -- parse, look the table up in the catalog, pick an access
-path, run the pipeline.
+this file can stay thin -- parse, look the tables up in the catalog, let the
+planner choose access paths, run the pipeline.
 
-The one thing worth reading closely is how transactions work here. Every statement
-runs inside `db.autocommit()`, so a statement on its own is its own transaction
-and a statement between `BEGIN` and `COMMIT` is part of that larger one. Which
-means a failed `INSERT INTO ... VALUES (a), (b), (c)` inserts none of them, and a
-failed statement inside an explicit transaction does not silently abandon the
-other statements around it.
+The part worth reading closely is how transactions work. Every statement runs
+inside `db.autocommit()`, so a statement on its own is its own transaction and a
+statement between `BEGIN` and `COMMIT` is part of that larger one. Which means a
+failed `INSERT INTO ... VALUES (a), (b), (c)` inserts none of them, and a failed
+statement inside an explicit transaction does not silently abandon the statements
+around it.
 
 `BEGIN`, `COMMIT` and `ROLLBACK` are the exception: they *are* transaction control,
-so they talk to the database directly instead of being wrapped in it.
+so they talk to the database directly rather than being wrapped in it.
 """
 
 from __future__ import annotations
@@ -20,7 +20,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from pydb.btree import DuplicateKeyError
-from pydb.catalog import Catalog, Table, TableExistsError, UnknownTableError
+from pydb.catalog import (
+    Catalog,
+    IndexExistsError,
+    Table,
+    TableExistsError,
+    UnknownIndexError,
+    UnknownTableError,
+)
 from pydb.database import Database
 from pydb.record import Schema
 from pydb.sql import nodes, planner
@@ -34,6 +41,7 @@ __all__ = [
     "ParseError",
     "PlanError",
     "ValueTypeError",
+    "DuplicateKeyError",
 ]
 
 
@@ -41,15 +49,15 @@ __all__ = [
 class Result:
     """What a statement produced.
 
-    A `SELECT` fills `columns` and `rows`; everything else fills `message` and,
-    where it means something, `row_count`.
+    A query fills `columns` and `rows`; everything else fills `message` and, where
+    it means something, `row_count`.
     """
 
     columns: tuple[str, ...] = ()
     rows: list[tuple] = field(default_factory=list)
     row_count: int = 0
     message: str = ""
-    plan: str = ""  # the access path chosen, for SELECT/UPDATE/DELETE
+    plan: str = ""  # the access paths chosen, for SELECT/UPDATE/DELETE
 
     @property
     def is_query(self) -> bool:
@@ -108,20 +116,39 @@ class Engine:
         if isinstance(statement, nodes.Rollback):
             self.db.rollback()
             return Result(message="ROLLBACK")
+        if isinstance(statement, nodes.Explain):
+            return self._explain(statement.statement)
 
         handlers = {
             nodes.CreateTable: self._create_table,
             nodes.DropTable: self._drop_table,
+            nodes.CreateIndex: self._create_index,
+            nodes.DropIndex: self._drop_index,
             nodes.Insert: self._insert,
             nodes.Select: self._select,
             nodes.Delete: self._delete,
             nodes.Update: self._update,
+            nodes.Vacuum: self._vacuum,
         }
         handler = handlers.get(type(statement))
         if handler is None:
             raise PlanError(f"cannot run {type(statement).__name__}")
         with self.db.autocommit():
             return handler(statement)
+
+    def _explain(self, statement: nodes.Statement) -> Result:
+        """The plan a statement would use, without running it."""
+        if isinstance(statement, nodes.Select):
+            lines = planner.build_plan(statement, self._table).describe()
+        elif isinstance(statement, (nodes.Delete, nodes.Update)):
+            table = self._table(statement.table)
+            binding = planner.single_source_binding(table.name, table)
+            source = planner.single_source_plan(binding, table, statement.where)
+            verb = "delete from" if isinstance(statement, nodes.Delete) else "update"
+            lines = [source.describe(), f"{verb} {table.name}"]
+        else:
+            lines = [f"{type(statement).__name__}: nothing to plan"]
+        return Result(columns=("plan",), rows=[(line,) for line in lines])
 
     # ------------------------------------------------------------------
     # definitions
@@ -145,6 +172,34 @@ class Engine:
         self.catalog.drop_table(statement.name)
         return Result(message=f"DROP TABLE {statement.name}")
 
+    def _create_index(self, statement: nodes.CreateIndex) -> Result:
+        if self.catalog.has_index(statement.name):
+            if statement.if_not_exists:
+                return Result(message=f"index {statement.name} already exists")
+            raise IndexExistsError(f"index {statement.name} already exists")
+        index = self.catalog.create_index(
+            statement.name, statement.table, statement.column, statement.unique
+        )
+        return Result(
+            message=f"CREATE INDEX {index.name} ON "
+            f"{statement.table}({index.column_name})"
+        )
+
+    def _drop_index(self, statement: nodes.DropIndex) -> Result:
+        if not self.catalog.has_index(statement.name):
+            if statement.if_exists:
+                return Result(message=f"no index {statement.name}")
+            raise UnknownIndexError(f"no such index: {statement.name}")
+        self.catalog.drop_index(statement.name)
+        return Result(message=f"DROP INDEX {statement.name}")
+
+    def _vacuum(self, _statement: nodes.Vacuum) -> Result:
+        """Squeeze the dead space out of every table's heap pages."""
+        reclaimed = 0
+        for name in self.catalog.table_names():
+            reclaimed += self.catalog.open(name).compact()
+        return Result(message=f"VACUUM reclaimed {reclaimed} bytes")
+
     # ------------------------------------------------------------------
     # rows
     # ------------------------------------------------------------------
@@ -163,8 +218,7 @@ class Engine:
             ]
             if missing:
                 raise PlanError(
-                    f"{table.name}: no value given for NOT NULL column(s) "
-                    f"{missing}"
+                    f"{table.name}: no value given for NOT NULL column(s) {missing}"
                 )
 
         inserted = 0
@@ -189,40 +243,26 @@ class Engine:
         return Result(row_count=inserted, message=f"INSERT {inserted}")
 
     def _select(self, statement: nodes.Select) -> Result:
-        table = self._table(statement.table)
-        columns = statement.columns
-        if columns is not None:
-            for name in columns:
-                self._column(table, name)
-        for key in statement.order_by:
-            self._column(table, key.column)
-
-        path = planner.choose_access_path(table, statement.where)
-        rows = planner.filter_rows(
-            planner.read_rows(table, path), table, statement.where
+        plan = planner.build_plan(statement, self._table)
+        return Result(
+            columns=tuple(plan.output),
+            rows=list(planner.run(plan)),
+            plan=plan.summary,
         )
-        if statement.order_by:
-            rows = planner.sort_rows(rows, table, statement.order_by)
-        projected = planner.project(rows, table, columns)
-        limited = planner.apply_limit(projected, statement.limit, statement.offset)
-
-        names = tuple(columns) if columns is not None else table.schema.names
-        return Result(columns=names, rows=list(limited), plan=str(path))
 
     def _delete(self, statement: nodes.Delete) -> Result:
         table = self._table(statement.table)
-        path = planner.choose_access_path(table, statement.where)
+        binding = planner.single_source_binding(table.name, table)
+        source = planner.single_source_plan(binding, table, statement.where)
         # Collect first, then delete: a heap scan is not a snapshot, so deleting
-        # while iterating can skip or repeat rows.
-        doomed = list(
-            planner.filter_rows(
-                planner.read_rows(table, path), table, statement.where
-            )
-        )
+        # while iterating it can skip or repeat rows.
+        doomed = list(planner.scan_single(binding, source, statement.where))
         for rid, values in doomed:
             table.delete(rid, values)
         return Result(
-            row_count=len(doomed), message=f"DELETE {len(doomed)}", plan=str(path)
+            row_count=len(doomed),
+            message=f"DELETE {len(doomed)}",
+            plan=source.describe(),
         )
 
     def _update(self, statement: nodes.Update) -> Result:
@@ -232,7 +272,9 @@ class Engine:
         for name, expression in statement.assignments:
             index = self._column(table, name)
             if not isinstance(expression, nodes.Literal):
-                raise PlanError(f"only literal values can be assigned, got {expression}")
+                raise PlanError(
+                    f"only literal values can be assigned, got {expression}"
+                )
             value = planner.coerce_value(
                 schema.columns[index].type, expression.value, f"{table.name}.{name}"
             )
@@ -240,19 +282,18 @@ class Engine:
                 raise PlanError(f"{table.name}.{name} is NOT NULL")
             assignments.append((index, value))
 
-        path = planner.choose_access_path(table, statement.where)
-        targets = list(
-            planner.filter_rows(
-                planner.read_rows(table, path), table, statement.where
-            )
-        )
+        binding = planner.single_source_binding(table.name, table)
+        source = planner.single_source_plan(binding, table, statement.where)
+        targets = list(planner.scan_single(binding, source, statement.where))
         for rid, values in targets:
             updated = list(values)
             for index, value in assignments:
                 updated[index] = value
             table.update(rid, values, tuple(updated))
         return Result(
-            row_count=len(targets), message=f"UPDATE {len(targets)}", plan=str(path)
+            row_count=len(targets),
+            message=f"UPDATE {len(targets)}",
+            plan=source.describe(),
         )
 
     # ------------------------------------------------------------------
@@ -273,8 +314,3 @@ class Engine:
                 f"{list(table.schema.names)}"
             )
         return table.schema.index(name)
-
-
-# Re-exported so callers can catch one thing: a duplicate key is a SQL-level error
-# even though it is raised by the B+Tree.
-__all__.append("DuplicateKeyError")

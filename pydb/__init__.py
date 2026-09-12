@@ -22,7 +22,7 @@ Underneath that are seven layers, each usable on its own:
 | 4 | `btree_node`, `btree` | an ordered index with range scans |
 | 5 | `wal` | a write-ahead log, so a crash is not data loss |
 | 6 | `database` | transactions: begin, commit, rollback |
-| 7 | `catalog`, `sql`, `repl` | tables that describe themselves, and SQL over them |
+| 7 | `catalog`, `sql`, `repl` | tables and indexes that describe themselves, and SQL over them |
 """
 
 from pydb.btree import BTree, BTreeError, CorruptTreeError, DuplicateKeyError
@@ -33,7 +33,16 @@ from pydb.buffer_pool import (
     BufferPoolError,
     PinnedPageError,
 )
-from pydb.catalog import Catalog, CatalogError, Table, TableInfo, UnknownTableError
+from pydb.catalog import (
+    Catalog,
+    CatalogError,
+    Index,
+    IndexInfo,
+    Table,
+    TableInfo,
+    UnknownIndexError,
+    UnknownTableError,
+)
 from pydb.database import Database, TransactionError
 from pydb.heap import HeapError, HeapFile, RowId, RowNotFoundError
 from pydb.pager import PAGE_SIZE, CorruptFileError, Pager, PagerError
@@ -93,8 +102,11 @@ __all__ = [
     "Catalog",
     "CatalogError",
     "UnknownTableError",
+    "UnknownIndexError",
     "Table",
     "TableInfo",
+    "Index",
+    "IndexInfo",
     "Engine",
     "Result",
     "SqlError",

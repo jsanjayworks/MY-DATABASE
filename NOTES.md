@@ -279,48 +279,78 @@ which costs space and never correctness.
 ## The catalog (layer 7)
 
 A database describes itself. Table definitions are rows in a B+Tree whose root
-lives in **meta slot 0**, keyed by the table name (UTF-8, so the names come back
-sorted) with this as the value:
+lives in **meta slot 0**. That tree holds two namespaces, separated by a one-byte
+key prefix:
+
+| Key | Value |
+|-----|-------|
+| `t` + table name | the table definition below |
+| `i` + index name | the name of the table it belongs to |
+
+The second exists so `DROP INDEX by_age` can find which table to look in; index
+names are database-wide, as they are in SQLite. Listing the tables is a range scan
+over the `t` prefix, which is why they come back sorted.
+
+### A table definition
 
 | Offset | Type | Field |
 |--------|------|-------|
-| 0  | `I` | first page of the row heap |
-| 4  | `I` | root page of the primary key index, 0 if there is none |
-| 8  | `h` | primary key column index, −1 if there is none |
-| 10 | `H` | column count |
-| 12 | ... | per column: `>H` name length, UTF-8 name, `>B` type, `>B` nullable |
+| 0 | `I` | first page of the row heap |
+| 4 | `H` | column count |
+| 6 | ... | per column: `>H` name length, UTF-8 name, `>B` type, `>B` nullable |
+| … | `H` | index count |
+| … | ... | per index: `>H` name length, name, `>H` column, `>B` flags, `>I` root page |
 
-Consequences of putting it in a tree value, which is capped at ~496 bytes:
+Index flags are `1` for unique and `2` for primary key. A primary key is not a
+special case: it is an index that happens to be flagged as one.
 
-- **about 24 columns per table**, depending on how long the names are. A real
-  database spills the definition across several rows; this one does not.
-- the index root is recorded *here*, not in a meta slot, because there is one per
-  table. When a table's index splits its root, the tree's `on_root_change` writes
-  the new page id back into this record — inside the same transaction, so a
-  rollback takes it back.
+Because a catalog row is a tree value, it is capped at ~496 bytes — so roughly **24
+columns plus a few indexes per table**, depending on name lengths. Over that,
+`encode` raises rather than truncating. A real database spreads the definition over
+several rows.
 
-### Dropping a table leaks its pages
+Each index's root page id is recorded *here* rather than in a meta slot, because
+there is one per index. When an index splits its root, the tree's `on_root_change`
+writes the new page id into this row — inside the current transaction, so a
+rollback takes it back.
 
-`DROP TABLE` removes the catalog row and stops there. Freeing every page of the
-heap and the index is easy to write and wrong to do in one transaction: layer 5
-caps a transaction at the size of the buffer pool, and a large table has far more
-pages than that. Doing it properly means freeing in batches across several
-transactions, which is a vacuum, not a drop.
+## Index keys (layer 7)
 
-### Three caches a rollback can invalidate
+A **unique** index stores `encode_key(value) -> row id`, and that is the whole
+story.
 
-This one cost real debugging time. A rolled-back transaction restores the file,
-but in-memory state derived from it is left describing pages that may no longer
-exist:
+A **non-unique** index cannot, because two rows may share a value and a B+Tree
+holds each key once. So the row id is appended to the key, which makes it unique
+again. Naively that breaks TEXT: `encode_key("ab")` is a prefix of
+`encode_key("abc")`, so a range over "keys starting with ab" would sweep up the
+rows for "abc" too.
 
-1. a `BTree`'s `root_page_id`, which a split may have moved;
-2. a `HeapFile`'s page chain and free-space map, which an append may have grown;
-3. a cached `TableInfo`, holding both of the above.
+The value part is therefore **escaped** first:
 
-So `Database.rollback` re-reads the root from its meta slot and calls every
-registered rollback hook, and the catalog's hook re-reads each open table. The
-rule that falls out of it: **after a rollback, anything derived from the file has
-to be derived again.**
+```
+every 0x00 byte -> 0x00 0xFF,  then terminate with 0x00 0x00
+```
+
+No escaped value can be a prefix of another, and the escaping preserves order,
+because the terminator `00 00` compares below both `00 FF` and any other byte. That
+makes a point lookup an exact prefix range and a `>` bound exact rather than
+approximate. The cost is a few bytes per key, paid only by non-unique indexes.
+
+**Rows whose indexed column is NULL are not in the index at all.** That is safe for
+exactly the reason three-valued logic exists: no condition an index is used for can
+be true of NULL. It also means a unique index permits any number of NULLs, which is
+what SQL says it should.
+
+## Dropping and vacuuming (layer 7)
+
+`DROP TABLE` and `DROP INDEX` free every page they owned, in **batches, each its
+own transaction** — a page is dirtied when it is freed (the free-list link is
+written into it), so freeing a large table in one transaction would hit the buffer
+pool's no-steal limit. A crash part-way through leaves the remainder unreclaimed: a
+space leak, never a correctness problem.
+
+`VACUUM` compacts every heap page, squeezing out the dead space that tombstoned
+rows leave behind. It does not move rows between pages or rebuild indexes.
 
 ## Durability
 

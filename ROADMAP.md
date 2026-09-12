@@ -147,22 +147,58 @@ stopped.
   differently depending on which plan runs, which is close to undiagnosable any
   other way.
 
+## Beyond the roadmap
+
+The seven layers were the plan; these went in afterwards, because a database
+without them is a toy:
+
+- **Joins** — INNER, LEFT and CROSS, with aliases and qualified column names.
+  Executed as a left-deep nested loop, and when the inner table's join column is
+  indexed the planner turns it into an **index nested-loop join**: one seek per
+  outer row instead of a full inner scan. On a 40-row table joined to a 4000-row
+  one that is measured as an order of magnitude fewer pages visited; on 1000 rows
+  it was 0.06s against 6.9s.
+- **Aggregates** — `COUNT` (including `COUNT(*)` and `COUNT(DISTINCT x)`), `SUM`,
+  `AVG`, `MIN`, `MAX`, with `GROUP BY`, `HAVING` and `DISTINCT`. `COUNT(*)` of
+  nothing is 0 and every other aggregate of nothing is NULL, which is the
+  specification and looks like a bug.
+- **Secondary indexes** — `CREATE [UNIQUE] INDEX` / `DROP INDEX`, any number per
+  table, used by the planner for equality, ranges and join probes. A non-unique
+  index appends the row id to the key and escapes the value part so that one
+  value's keys cannot be confused with a longer value's; the escaping is in
+  `NOTES.md` and is the most interesting ten lines in the layer.
+- **`EXPLAIN`** — in front of any query, printing the access paths and the pipeline
+  above them. The access-path tests assert on it, because a query that returns the
+  right rows the slow way is still broken.
+- **Page reclamation** — `DROP TABLE` and `DROP INDEX` now free their pages, in
+  batches, and `VACUUM` compacts the dead space out of heap pages.
+
+### What it found, one layer down
+
+A `DROP TABLE` freeing hundreds of pages surfaced a layer 5 bug that nothing else
+could reach: committing a free left the page on the pager's free list **while its
+frame was still in the buffer pool**, so the next allocation handed out a page id
+the pool already held. The fix is three lines; finding it took the guard added back
+in layer 2 for a different reason.
+
 ## Where this stops
 
-The seven layers are done. The honest list of what a real database has that this
-one does not:
+The honest list of what a real database has that this one still does not:
 
-- **Overflow pages.** A row is capped at 4080 bytes and a tree value at ~496.
+- **Subqueries and set operations.** No `IN (SELECT ...)`, no `UNION`.
+- **Overflow pages.** A row is capped at 4080 bytes and a tree value at ~496, which
+  also caps a table definition at roughly 24 columns.
 - **Real isolation.** One global lock, so no two transactions ever overlap. 2PL or
   MVCC needs a thread-safe buffer pool first.
 - **Undo logging.** Redo only, which is why an uncommitted page may not be evicted
   and a transaction cannot outgrow the buffer pool.
-- **Joins and aggregates.** One table per query.
-- **A vacuum.** `DROP TABLE` leaks the table's pages; so does a crash in the narrow
-  window after a commit fsync.
-- **A query optimiser.** The planner picks an index when it can and scans
-  otherwise. No statistics, no cost model, no join ordering — there being no
-  joins.
+- **A cost-based optimiser.** The planner prefers an index whenever one applies and
+  joins in the order written. With no statistics it cannot know that scanning a
+  four-page table beats descending a tree, and there is a test documenting exactly
+  that case.
+- **Composite keys and indexes.** One column each.
+- **Floating point, dates, and NULL ordering options.** INT and TEXT; NULLs sort
+  first, always.
 
 ## Ordering advice
 

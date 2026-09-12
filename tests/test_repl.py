@@ -146,7 +146,7 @@ class TestDotCommands(ReplTestCase):
             ".plan off\n"
             "SELECT * FROM t WHERE id = 1;\n"
         )
-        self.assertEqual(output.count("index lookup"), 1)
+        self.assertEqual(output.count("seek t using t_pkey"), 1)
 
     def test_help_mentions_the_commands(self):
         output, _ = self.session(".help\n")

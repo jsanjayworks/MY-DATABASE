@@ -108,8 +108,94 @@ class TestParser(unittest.TestCase):
         self.assertEqual(len(parse("INSERT INTO t VALUES (1), (2), (3)").rows), 3)
 
     def test_select_star_and_named_columns(self):
-        self.assertIsNone(parse("SELECT * FROM t").columns)
-        self.assertEqual(parse("SELECT a, b FROM t").columns, ["a", "b"])
+        star = parse("SELECT * FROM t").items
+        self.assertEqual(len(star), 1)
+        self.assertIsInstance(star[0].value, nodes.Star)
+        named = parse("SELECT a, b FROM t").items
+        self.assertEqual([item.label() for item in named], ["a", "b"])
+        self.assertEqual(parse("SELECT * FROM t").source.name, "t")
+
+    def test_column_references_keep_their_qualifier(self):
+        item = parse("SELECT people.name FROM people").items[0]
+        self.assertEqual(item.value, nodes.ColumnRef("name", "people"))
+        self.assertEqual(item.label(), "name")
+
+    def test_aliases_with_and_without_as(self):
+        items = parse("SELECT a AS x, b y, c FROM t").items
+        self.assertEqual([item.label() for item in items], ["x", "y", "c"])
+
+    def test_joins_nest_to_the_left(self):
+        source = parse("SELECT * FROM a JOIN b ON a.id = b.id JOIN c ON c.id = a.id").source
+        self.assertIsInstance(source, nodes.Join)
+        self.assertEqual(source.right.name, "c")
+        self.assertIsInstance(source.left, nodes.Join)
+        self.assertEqual(source.left.right.name, "b")
+        self.assertEqual(source.left.left.name, "a")
+
+    def test_join_kinds(self):
+        for sql, kind in (
+            ("SELECT * FROM a JOIN b ON a.x = b.x", "INNER"),
+            ("SELECT * FROM a INNER JOIN b ON a.x = b.x", "INNER"),
+            ("SELECT * FROM a LEFT JOIN b ON a.x = b.x", "LEFT"),
+            ("SELECT * FROM a LEFT OUTER JOIN b ON a.x = b.x", "LEFT"),
+            ("SELECT * FROM a CROSS JOIN b", "CROSS"),
+            ("SELECT * FROM a, b", "CROSS"),
+        ):
+            with self.subTest(sql=sql):
+                self.assertEqual(parse(sql).source.kind, kind)
+
+    def test_a_left_join_without_on_is_refused(self):
+        with self.assertRaises(ParseError):
+            parse("SELECT * FROM a LEFT JOIN b")
+
+    def test_table_aliases(self):
+        source = parse("SELECT * FROM people AS p JOIN pets q ON p.id = q.owner").source
+        self.assertEqual((source.left.name, source.left.alias), ("people", "p"))
+        self.assertEqual((source.right.name, source.right.alias), ("pets", "q"))
+        self.assertEqual(source.left.label, "p")
+
+    def test_aggregates_parse_with_and_without_distinct(self):
+        items = parse("SELECT COUNT(*), SUM(a), COUNT(DISTINCT b) FROM t").items
+        self.assertTrue(items[0].value.is_count_star)
+        self.assertEqual(items[1].value.name, "SUM")
+        self.assertTrue(items[2].value.distinct)
+        self.assertEqual([item.label() for item in items],
+                         ["count(*)", "sum(a)", "count(DISTINCT b)"])
+
+    def test_only_count_takes_a_star(self):
+        with self.assertRaises(ParseError):
+            parse("SELECT SUM(*) FROM t")
+
+    def test_nested_aggregates_are_refused(self):
+        with self.assertRaises(ParseError):
+            parse("SELECT SUM(COUNT(a)) FROM t")
+
+    def test_group_by_having_and_distinct(self):
+        statement = parse(
+            "SELECT DISTINCT a, COUNT(*) FROM t GROUP BY a, b HAVING COUNT(*) > 1"
+        )
+        self.assertTrue(statement.distinct)
+        self.assertEqual(len(statement.group_by), 2)
+        self.assertIsInstance(statement.having, nodes.Compare)
+
+    def test_create_and_drop_index(self):
+        statement = parse("CREATE UNIQUE INDEX by_name ON people (name)")
+        self.assertEqual(
+            (statement.name, statement.table, statement.column, statement.unique),
+            ("by_name", "people", "name", True),
+        )
+        self.assertFalse(parse("CREATE INDEX i ON t (c)").unique)
+        self.assertTrue(parse("DROP INDEX IF EXISTS i").if_exists)
+
+    def test_a_composite_index_is_refused(self):
+        with self.assertRaises(ParseError):
+            parse("CREATE INDEX i ON t (a, b)")
+
+    def test_vacuum_and_explain(self):
+        self.assertIsInstance(parse("VACUUM"), nodes.Vacuum)
+        explained = parse("EXPLAIN SELECT * FROM t")
+        self.assertIsInstance(explained, nodes.Explain)
+        self.assertIsInstance(explained.statement, nodes.Select)
 
     def test_and_binds_tighter_than_or(self):
         where = parse("SELECT * FROM t WHERE a = 1 AND b = 2 OR c = 3").where
@@ -143,10 +229,15 @@ class TestParser(unittest.TestCase):
             "SELECT * FROM t ORDER BY a DESC, b ASC, c LIMIT 5 OFFSET 10"
         )
         self.assertEqual(
-            [(k.column, k.descending) for k in statement.order_by],
+            [(str(k.value), k.descending) for k in statement.order_by],
             [("a", True), ("b", False), ("c", False)],
         )
         self.assertEqual((statement.limit, statement.offset), (5, 10))
+
+    def test_order_by_an_output_position(self):
+        statement = parse("SELECT a, b FROM t ORDER BY 2 DESC")
+        self.assertEqual(statement.order_by[0].value, 2)
+        self.assertTrue(statement.order_by[0].descending)
 
     def test_update_and_delete(self):
         statement = parse("UPDATE t SET a = 1, b = 'x' WHERE c = 2")
@@ -162,7 +253,9 @@ class TestParser(unittest.TestCase):
     def test_a_trailing_semicolon_is_allowed_but_trailing_junk_is_not(self):
         self.assertIsInstance(parse("SELECT * FROM t;"), nodes.Select)
         with self.assertRaises(ParseError):
-            parse("SELECT * FROM t nonsense")
+            parse("SELECT * FROM t 99")
+        # A bare name after a table *is* valid: it is an alias.
+        self.assertEqual(parse("SELECT * FROM t x").source.alias, "x")
 
     def test_a_script_splits_on_semicolons(self):
         statements = parse_script(
@@ -431,10 +524,10 @@ class TestAccessPaths(EngineTestCase):
         return self.sql.execute(sql).plan
 
     def test_equality_on_the_primary_key_uses_an_index_lookup(self):
-        self.assertIn("index lookup", self.plan("SELECT * FROM people WHERE id = 2"))
+        self.assertIn("seek", self.plan("SELECT * FROM people WHERE id = 2"))
 
     def test_the_comparison_can_be_written_either_way_round(self):
-        self.assertIn("index lookup", self.plan("SELECT * FROM people WHERE 2 = id"))
+        self.assertIn("seek", self.plan("SELECT * FROM people WHERE 2 = id"))
 
     def test_a_range_on_the_primary_key_uses_an_index_range(self):
         for sql in (
@@ -444,7 +537,7 @@ class TestAccessPaths(EngineTestCase):
             "SELECT * FROM people WHERE id <= 3",
         ):
             with self.subTest(sql=sql):
-                self.assertIn("index range", self.plan(sql))
+                self.assertIn("range", self.plan(sql))
 
     def test_a_range_bound_is_exact_at_the_edges(self):
         """The tree's bounds and SQL's are not the same: `>` is exclusive and the
@@ -466,7 +559,7 @@ class TestAccessPaths(EngineTestCase):
 
     def test_an_indexable_condition_inside_an_and_is_still_used(self):
         plan = self.plan("SELECT * FROM people WHERE name = 'bob' AND id = 2")
-        self.assertIn("index lookup", plan)
+        self.assertIn("seek", plan)
 
     def test_an_or_cannot_use_the_index(self):
         """Both halves have to be considered, so the index would miss rows."""
@@ -656,7 +749,7 @@ class TestPersistence(EngineTestCase):
                 table.insert((i, f"name-{i}"))
         self.reopen()
         self.sql.catalog.open("big").verify()
-        self.assertIn("index lookup", self.sql.execute(
+        self.assertIn("seek", self.sql.execute(
             "SELECT * FROM big WHERE id = 2999"
         ).plan)
         self.assertEqual(
