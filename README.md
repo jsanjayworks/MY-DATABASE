@@ -14,7 +14,7 @@ there and can explain.
 | 2. Buffer pool | ✅ | frames, pin/unpin, dirty write-back, clock eviction |
 | 3. Records | ✅ | schemas, row codec, slotted pages, heap files |
 | 4. B+Tree | ✅ | ordered index, splits, merges, range scans |
-| 5. WAL / recovery | ⬜ | |
+| 5. WAL / recovery | ✅ | page-image log, commit/rollback, checkpoints, replay |
 | 6. Transactions | ⬜ | |
 | 7. SQL engine | ⬜ | |
 

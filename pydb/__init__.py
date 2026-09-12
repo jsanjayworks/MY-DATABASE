@@ -20,6 +20,7 @@ from pydb.record import (
     encode_key,
 )
 from pydb.slotted_page import NoRoomError, RowTooLargeError, SlottedPage
+from pydb.wal import CorruptWalError, Wal, WalError
 
 __all__ = [
     # layer 1
@@ -53,4 +54,8 @@ __all__ = [
     "DuplicateKeyError",
     "CorruptTreeError",
     "CellTooLargeError",
+    # layer 5
+    "Wal",
+    "WalError",
+    "CorruptWalError",
 ]

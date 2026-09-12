@@ -27,6 +27,15 @@ META_SIZE = struct.calcsize(META_FORMAT)
 META_PAGE_ID = 0
 NULL_PAGE_ID = 0
 
+# Bytes 20.. of the meta page are eight 8-byte slots for the layers above, which
+# need somewhere durable to write a page id that moves. This is the registry of
+# who owns which slot, kept here so two layers cannot claim the same one.
+META_SLOT_FORMAT = ">Q"
+META_SLOT_SIZE = struct.calcsize(META_SLOT_FORMAT)
+META_SLOT_COUNT = 8
+
+META_SLOT_ROOT = 0  # root page id of the top-level B+Tree (layer 7's catalog)
+
 # A freed page stores the next free page id in its first four bytes.
 FREE_NEXT_FORMAT = ">I"
 FREE_NEXT_SIZE = struct.calcsize(FREE_NEXT_FORMAT)
@@ -61,6 +70,13 @@ class Pager:
         # double free costs a page read per free page, which turns freeing a lot
         # of pages into a quadratic disk grind; a set makes the check O(1).
         self._free_set: set[int] = set()
+        self._meta_slots = [0] * META_SLOT_COUNT
+        # Layer 5 turns this on. While it is set the pager stops writing page 0
+        # itself and only marks it dirty: the write-ahead log decides when the
+        # meta page is safe to put on disk, because a torn meta page is one of
+        # the few ways to lose a whole database at once.
+        self.defer_meta = False
+        self._meta_dirty = False
         self._file = None
         self._open()
 
@@ -146,21 +162,102 @@ class Pager:
         self.page_count = page_count
         self.free_list_head = free_head
         self._free_set = set(self.free_pages())  # one walk, at open
+        self._meta_slots = list(
+            struct.unpack_from(
+                f">{META_SLOT_COUNT}Q", self._read_page_raw(META_PAGE_ID), META_SIZE
+            )
+        )
 
-    def _write_meta(self) -> None:
-        header = struct.pack(
+    def meta_image(self) -> bytes:
+        """The meta page exactly as it should look on disk right now.
+
+        Everything past the slots is read back from the file and preserved: the
+        pager does not own those bytes and must not clobber them.
+        """
+        page = bytearray(self._read_page_raw(META_PAGE_ID))
+        struct.pack_into(
             META_FORMAT,
+            page,
+            0,
             MAGIC,
             FORMAT_VERSION,
             PAGE_SIZE,
             self.page_count,
             self.free_list_head,
         )
-        # Preserve the reserved tail of the meta page; later layers store the
-        # B+Tree root and the WAL checkpoint there.
-        page = bytearray(self._read_page_raw(META_PAGE_ID))
-        page[:META_SIZE] = header
-        self._write_page_raw(META_PAGE_ID, page)
+        struct.pack_into(
+            f">{META_SLOT_COUNT}Q", page, META_SIZE, *self._meta_slots
+        )
+        return bytes(page)
+
+    def read_meta_slot(self, slot: int) -> int:
+        """One of the meta page's durable 8-byte slots. 0 means "unset"."""
+        self._check_slot(slot)
+        return self._meta_slots[slot]
+
+    def write_meta_slot(self, slot: int, value: int) -> None:
+        """Set a meta slot. Deferred like every other meta change when logging."""
+        self._check_slot(slot)
+        if value < 0 or value >= 2 ** (8 * META_SLOT_SIZE):
+            raise PagerError(f"meta slot value {value} does not fit in 8 bytes")
+        self._meta_slots[slot] = value
+        self._write_meta()
+
+    def _check_slot(self, slot: int) -> None:
+        if not isinstance(slot, int) or not 0 <= slot < META_SLOT_COUNT:
+            raise PagerError(
+                f"meta slot must be 0..{META_SLOT_COUNT - 1}, got {slot!r}"
+            )
+
+    def _write_meta(self) -> None:
+        if self.defer_meta:
+            self._meta_dirty = True
+            return
+        self._write_page_raw(META_PAGE_ID, self.meta_image())
+
+    @property
+    def flush_meta_pending(self) -> bool:
+        """Whether a deferred meta-page write is waiting."""
+        return self._meta_dirty
+
+    def flush_meta(self) -> bool:
+        """Write the deferred meta page. Returns whether there was one to write."""
+        if not self._meta_dirty:
+            return False
+        self._write_page_raw(META_PAGE_ID, self.meta_image())
+        self._meta_dirty = False
+        return True
+
+    def reload_meta(self) -> None:
+        """Re-read page 0 from disk, discarding the in-memory copy.
+
+        Recovery uses this: it rewrites page 0 from the log, so the pager's idea
+        of the page count and the free list has to be thrown away and re-read.
+        """
+        self._meta_dirty = False
+        self._read_meta()
+
+    def meta_state(self) -> tuple:
+        """A snapshot of everything `_write_meta` would persist, for rollback."""
+        return (
+            self.page_count,
+            self.free_list_head,
+            frozenset(self._free_set),
+            tuple(self._meta_slots),
+        )
+
+    def restore_meta_state(self, state: tuple) -> None:
+        """Put back a snapshot from `meta_state`.
+
+        Undoes allocations, frees, and slot writes together -- which is what makes
+        "the B+Tree root moved" a change a transaction can roll back.
+        """
+        page_count, free_head, free_set, slots = state
+        self.page_count = page_count
+        self.free_list_head = free_head
+        self._free_set = set(free_set)
+        self._meta_slots = list(slots)
+        self._meta_dirty = True
 
     # ------------------------------------------------------------------
     # reading and writing pages
@@ -217,7 +314,10 @@ class Pager:
         else:
             page_id = self.page_count
             self.page_count += 1
-        self._write_page_raw(page_id, ZERO_PAGE)
+        if not self.defer_meta:
+            # With a log attached, zeroing the page here would be an unlogged
+            # write to the data file. The caller's first write covers it instead.
+            self._write_page_raw(page_id, ZERO_PAGE)
         self._write_meta()
         return page_id
 
@@ -235,6 +335,38 @@ class Pager:
         self.free_list_head = page_id
         self._free_set.add(page_id)
         self._write_meta()
+
+    def stage_free(self, page_id: int, image: bytearray) -> None:
+        """Free `page_id` by writing its free-list link into `image` in memory.
+
+        `free_page` writes that link straight to the file, which is exactly what
+        the write-ahead rule forbids: the link would reach the data file before
+        the log record describing it. This version hands the bytes back to the
+        caller instead, so a log can be written first and the page can go to disk
+        with everything else at commit time.
+        """
+        self._check_page_id(page_id)
+        if page_id == META_PAGE_ID:
+            raise PagerError("cannot free the meta page")
+        if page_id in self._free_set:
+            raise PagerError(f"page {page_id} is already free (double free)")
+        if len(image) != PAGE_SIZE:
+            raise PagerError(f"a page image is {PAGE_SIZE} bytes, got {len(image)}")
+        image[:] = ZERO_PAGE
+        struct.pack_into(FREE_NEXT_FORMAT, image, 0, self.free_list_head)
+        self.free_list_head = page_id
+        self._free_set.add(page_id)
+        self._write_meta()
+
+    def restore_page(self, page_id: int, image: bytes) -> None:
+        """Overwrite any page, meta page included. **Recovery only.**
+
+        `write_page` refuses page 0 on purpose, but replaying a log has to be able
+        to put back the meta page -- that is the whole point of logging it.
+        """
+        if len(image) != PAGE_SIZE:
+            raise PagerError(f"a page image is {PAGE_SIZE} bytes, got {len(image)}")
+        self._write_page_raw(page_id, image)
 
     def free_pages(self) -> list[int]:
         """Walk the free list, head first. Useful in tests and debugging."""

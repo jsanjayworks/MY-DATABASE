@@ -228,11 +228,14 @@ class TestEviction(PoolTestCase):
 
 
 class TestAllocation(PoolTestCase):
-    def test_new_page_is_zeroed_and_pinned(self):
+    def test_new_page_is_zeroed_pinned_and_already_dirty(self):
+        """Dirty from birth: a new page's zeros exist only in this frame, so the
+        frame is the only place they can be written from."""
         pool = self.pool()
         page_id, page = pool.new_page()
         self.assertEqual(page, bytearray(PAGE_SIZE))
         self.assertEqual(pool.pin_count(page_id), 1)
+        self.assertEqual(pool.dirty_pages(), [page_id])
         pool.unpin_page(page_id)
 
     def test_new_page_does_not_read_from_disk(self):
@@ -294,14 +297,19 @@ class TestPersistence(PoolTestCase):
 
         This is not a bug to fix, it is the contract. A pool that guessed which
         pages changed would have to copy every page it handed out, which is
-        exactly the cost layer 2 exists to avoid.
+        exactly the cost layer 2 exists to avoid. (A *new* page is the one
+        exception: it starts dirty, because its zeros exist only in the frame.)
         """
         with BufferPool.open(self.path, capacity=4) as pool:
             page_id, page = pool.new_page()
-            page[:4] = b"lost"
-            pool.unpin_page(page_id, dirty=False)
+            page[:4] = b"orig"
+            pool.unpin_page(page_id, dirty=True)
+
+        with BufferPool.open(self.path, capacity=4) as pool:
+            with pool.pinned(page_id) as page:  # modified, never reported
+                page[:4] = b"lost"
         with Pager(self.path) as pager:
-            self.assertEqual(pager.read_page(page_id)[:4], bytearray(4))
+            self.assertEqual(pager.read_page(page_id)[:4], b"orig")
 
     def test_flush_page_leaves_the_frame_resident_and_pinned(self):
         pool = self.pool()

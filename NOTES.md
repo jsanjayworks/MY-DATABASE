@@ -28,9 +28,13 @@ page id** throughout the codebase.
 | 10 | `H`  | page_size | 4096; guards against opening a file written with a different page size |
 | 12 | `I`  | page_count | total pages that exist in the file, including page 0 |
 | 16 | `I`  | free_list_head | page id of the first free page, or 0 if none |
+| 20 | `8Q` | slots | eight 8-byte slots for the layers above; 0 means unset |
 
-Bytes 20..4095 of the meta page are reserved (zero). Future layers claim space
-here: the B+Tree root page id, the catalog root, the WAL checkpoint LSN.
+The slots are where a layer puts a page id that *moves*. Slot 0 holds the root
+page id of the top-level B+Tree (layer 7's catalog); slots 1–7 are unclaimed. The
+registry lives in `pager.py` so that two layers cannot claim the same slot.
+
+Bytes 84..4095 of the meta page are reserved (zero).
 
 ## Free pages
 
@@ -185,10 +189,103 @@ every change through `on_root_change`, and whatever owns the tree writes the new
 id somewhere durable. A tree reopened with a stale root id is silently missing
 most of itself.
 
+## The write-ahead log (layer 5)
+
+A second file, `<database>.wal`, holding **whole page images**. Fatter than
+logging individual byte changes, but replay is idempotent, so recovery is one
+forward pass with no undo phase. SQLite's WAL makes the same choice.
+
+### Header (24 bytes)
+
+| Offset | Type | Field |
+|--------|------|-------|
+| 0  | `8s` | magic `PYDBWAL\0` |
+| 8  | `H`  | version, currently 1 |
+| 10 | `H`  | page_size |
+| 12 | `I`  | reserved |
+| 16 | `Q`  | first LSN in this generation |
+
+The log is emptied at every checkpoint, and `first_lsn` is how LSNs keep climbing
+across those generations instead of restarting.
+
+### Frames (20 + 4096 bytes each)
+
+| Offset | Type | Field |
+|--------|------|-------|
+| 0  | `Q` | LSN |
+| 8  | `I` | page id |
+| 12 | `I` | CRC32 of `(lsn, page_id, flags, image)` |
+| 16 | `B` | flags: bit 0 = **commit** |
+| 17 | `3x` | padding |
+| 20 | 4096 bytes | the page image |
+
+The checksum covers the header fields as well as the image, so a torn *header* is
+caught too. The commit flag marks the last frame of a transaction: frames after
+the final commit flag belong to a transaction that never finished, and recovery
+discards them. That is where atomicity comes from.
+
+### The order of a commit
+
+The order *is* the algorithm:
+
+1. deferred page frees are applied **in memory**, so the freed pages and the meta
+   page get logged rather than sneaking out on their own;
+2. one frame per modified page is appended, the last flagged `commit`, and the log
+   is **fsynced**. The transaction is durable at this instant and no earlier;
+3. the modified pages are written to the data file, *unsynced* — the log already
+   guarantees them;
+4. the deferred meta page is written, for the same reason.
+
+Two fsyncs, log first. One fsync covering both would prove nothing.
+
+### What this changed underneath
+
+- **The pager stops writing page 0 itself.** With a log attached, `defer_meta`
+  makes meta changes accumulate in memory and the log decides when they are safe.
+  A torn meta page is one of the few ways to lose an entire database at once, so
+  page 0 is logged like everything else.
+- **Freeing a page is deferred to commit.** `free_page` writes a free-list link
+  *into* the freed page, which is a data-file write like any other and may not go
+  out ahead of its log record. `Pager.stage_free` does it to an in-memory image
+  instead.
+- **Allocation no longer zeroes the page on disk**, because that would be another
+  unlogged write. A new page is dirty from birth instead, so its zeros are written
+  from its frame with everything else.
+
+### Recovery
+
+Read frames forward until one is short, fails its checksum, or breaks the LSN
+sequence — all three mean "the crash was here". Apply every frame up to the last
+commit flag, fsync the data file, then empty the log. Applying a frame twice is
+harmless, so a crash *during recovery* is fine too.
+
+### The price: no stealing
+
+An uncommitted page may not be evicted from the buffer pool, because once it is in
+the data file a rollback can no longer take it back. So **a transaction cannot
+outgrow the buffer pool** — it raises `AllFramesPinnedError` instead. The
+alternative is writing undo records as well as redo, which is a layer of its own.
+Rollback is then simply forgetting: drop the modified frames and let them be read
+from the data file again.
+
+### Still true after a crash, and not before
+
+The layer 1 note below is now out of date in one respect: a crash mid-allocate no
+longer corrupts anything, because the meta page is in the log. What remains true
+is that **a page freed by a transaction can leak** if the crash lands in the
+narrow window after the commit fsync — the page is unreachable and unreclaimed,
+which costs space and never correctness.
+
 ## Durability
 
 `page_count` and `free_list_head` live on the meta page, so every allocate and
-free rewrites page 0. Right now that write is not crash-safe: a crash between
-writing a page and writing the meta page can leak or double-allocate a page.
-**Layer 5 (the write-ahead log) is what fixes this** — until then, treat a crash
-mid-write as "the file may be inconsistent".
+free rewrites page 0. On its own that is not crash-safe — a crash between writing
+a page and writing the meta page can leak or double-allocate one — which is why
+**a pager with a log attached stops writing page 0 itself**. Opened without a log
+(`Pager` alone, as in its own tests) the old behaviour stands and a crash
+mid-write can leave the file inconsistent.
+
+With the log, the one thing a crash can still cost is a *leaked* page: a page
+freed by a transaction, where the crash lands in the narrow window after the
+commit fsync. The page is unreachable and unreclaimed. That costs space, never
+correctness.

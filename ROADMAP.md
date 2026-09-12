@@ -70,17 +70,31 @@ The hard one. It was.
   rejoined the free list, which only became reachable once the tree started
   freeing pages.
 
-## Layer 5 — Durability (WAL)
+## Layer 5 — Durability (WAL) ✅
 
-Right now a crash mid-allocate can corrupt the file. This is where that stops.
+A crash mid-allocate used to be able to corrupt the file. This is where that
+stopped.
 
-- Log records with LSNs, write-ahead rule (log hits disk before the page does),
-  checkpoints, redo on startup.
-- **Milestone:** a crash-torture test — a child process writes in a loop and is
-  killed at a random moment; on reopen the database is always consistent and
-  every acknowledged write is present.
-- **Trap:** fsync ordering. The log must be durable *before* the data page, and
-  that means two separate fsyncs, not one.
+- Code: `pydb/wal.py` · Tests: `tests/test_wal.py`
+- Whole page images rather than byte diffs, so replay is idempotent and recovery
+  is one forward pass with no undo phase. LSNs, a commit flag per transaction,
+  CRC32 per frame, checkpoints, redo on startup.
+- **Milestone (met):** a child process writes batches in a loop and is killed at
+  a moment it does not choose, four rounds, each continuing on the database the
+  last crash left. On reopen the tree passes `verify_invariants()`, every
+  acknowledged batch is present, and every unacknowledged batch is either
+  entirely there or entirely absent — never half applied.
+- **Trap, as advertised:** fsync ordering. Two fsyncs, log first. One covering
+  both would prove nothing.
+- **What this forced downstream:** three writes that were quietly going straight
+  to the data file had to stop. The pager no longer writes page 0 itself (a torn
+  meta page loses everything); freeing a page no longer writes its free-list link
+  immediately, because that is a data write like any other; and allocation no
+  longer zeroes the page on disk, so a new page is dirty from birth instead.
+- **The price, and it is a real one:** no stealing. An uncommitted page may not be
+  evicted, or a rollback could not take it back, so a transaction cannot outgrow
+  the buffer pool. It raises rather than quietly writing uncommitted data. The
+  alternative is undo records as well as redo — a layer of its own.
 
 ## Layer 6 — Transactions
 

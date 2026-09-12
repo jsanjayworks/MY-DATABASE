@@ -123,6 +123,11 @@ class BufferPool:
         self._hand = 0  # the clock hand
         self._owns_pager = False
         self._closed = False
+        # Layer 5 attaches itself here. Two methods, and the pool needs nothing
+        # else: `note_dirty(page_id)` to learn what a transaction has touched, and
+        # `holds_uncommitted(page_id)` to answer "would writing this page to the
+        # data file break the write-ahead rule?".
+        self.wal = None
 
     @classmethod
     def open(
@@ -220,7 +225,7 @@ class BufferPool:
             )
         frame.pin_count -= 1
         if dirty:
-            frame.dirty = True
+            self._mark_dirty(frame)
 
     @contextmanager
     def pinned(self, page_id: int, dirty: bool = False) -> Iterator[bytearray]:
@@ -253,9 +258,13 @@ class BufferPool:
                 f"was freed without going through BufferPool.free_page"
             )
         frame = self._claim_frame()
-        # allocate_page zeroed the page on disk, so skip the read entirely.
+        # There is nothing worth reading: the page is new, so zero the frame.
         frame.data[:] = bytes(PAGE_SIZE)
         self._install(frame, page_id)
+        # A new page starts dirty. With a log attached the pager deliberately does
+        # not zero the page on disk, so those zeros exist only in this frame and
+        # have to be written like any other change.
+        self._mark_dirty(frame)
         return page_id, frame.data
 
     def free_page(self, page_id: int) -> None:
@@ -266,12 +275,17 @@ class BufferPool:
         """
         self._require_open()
         frame = self._table.get(page_id)
+        if frame is not None and frame.pin_count > 0:
+            raise PinnedPageError(
+                f"cannot free page {page_id}: still pinned {frame.pin_count} time(s)"
+            )
+        if self.wal is not None:
+            # Freeing writes a free-list link into the page, which is a change to
+            # the data file like any other and may not reach disk ahead of its log
+            # record. The log defers it to commit time.
+            self.wal.stage_free(page_id)
+            return
         if frame is not None:
-            if frame.pin_count > 0:
-                raise PinnedPageError(
-                    f"cannot free page {page_id}: still pinned "
-                    f"{frame.pin_count} time(s)"
-                )
             self._evict(frame, flush=False)
         self.pager.free_page(page_id)
 
@@ -306,6 +320,34 @@ class BufferPool:
     # ------------------------------------------------------------------
     # introspection, mostly for tests and assertions
     # ------------------------------------------------------------------
+
+    def peek_page(self, page_id: int) -> bytearray | None:
+        """The cached bytes of `page_id`, or None if it is not resident.
+
+        No pin, no read, no effect on eviction order -- for code that wants to
+        look at a page only if looking is free. Layer 5 uses it to log a page's
+        image without disturbing the cache.
+        """
+        frame = self._table.get(page_id)
+        return frame.data if frame is not None else None
+
+    def discard_page(self, page_id: int) -> bool:
+        """Drop `page_id` from the cache **without writing it**, if it is resident.
+
+        This throws away changes on purpose: it is how a rollback undoes one, by
+        forcing the page to be read from the data file again.
+        """
+        self._require_open()
+        frame = self._table.get(page_id)
+        if frame is None:
+            return False
+        if frame.pin_count > 0:
+            raise PinnedPageError(
+                f"cannot discard page {page_id}: still pinned "
+                f"{frame.pin_count} time(s)"
+            )
+        self._evict(frame, flush=False)
+        return True
 
     def pinned_count(self) -> int:
         return sum(1 for f in self._frames if f.pin_count > 0)
@@ -343,6 +385,11 @@ class BufferPool:
         frame.referenced = True
         self._table[page_id] = frame
 
+    def _mark_dirty(self, frame: Frame) -> None:
+        frame.dirty = True
+        if self.wal is not None:
+            self.wal.note_dirty(frame.page_id)
+
     def _claim_frame(self) -> Frame:
         """Return an empty frame, evicting something if necessary."""
         if not self._free:
@@ -366,13 +413,18 @@ class BufferPool:
             )
             if frame.pin_count > 0:
                 continue
+            if self.wal is not None and self.wal.holds_uncommitted(frame.page_id):
+                # Writing this page out would put an uncommitted change in the
+                # data file, where a rollback could no longer take it back.
+                continue
             if frame.referenced:
                 frame.referenced = False
                 continue
             return frame
         raise AllFramesPinnedError(
-            f"all {self.capacity} frames are pinned; unpin a page or open the "
-            f"pool with a larger capacity"
+            f"no frame can be evicted: all {self.capacity} are pinned or hold "
+            f"uncommitted changes. Unpin pages, commit the transaction, or open "
+            f"the pool with a larger capacity"
         )
 
     def _evict(self, frame: Frame, flush: bool) -> None:
@@ -393,6 +445,10 @@ class BufferPool:
         self._free.append(frame)
 
     def _write_back(self, frame: Frame) -> None:
+        assert self.wal is None or not self.wal.holds_uncommitted(frame.page_id), (
+            f"write-ahead rule violated: page {frame.page_id} would reach the "
+            f"data file before its log record is durable"
+        )
         self.pager.write_page(frame.page_id, frame.data)
         frame.dirty = False
         self.stats.disk_writes += 1
