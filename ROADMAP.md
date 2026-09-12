@@ -96,13 +96,26 @@ stopped.
   the buffer pool. It raises rather than quietly writing uncommitted data. The
   alternative is undo records as well as redo — a layer of its own.
 
-## Layer 6 — Transactions
+## Layer 6 — Transactions ✅
 
-- `BEGIN` / `COMMIT` / `ROLLBACK`, then isolation. Start with one global lock;
-  move to 2PL or MVCC once single-threaded correctness is solid.
-- **Milestone:** concurrent transfers between accounts never change the total.
-- **Trap:** don't start here. Concurrency bugs on top of a shaky B+Tree are
-  almost impossible to diagnose.
+- Code: `pydb/database.py` · Tests: `tests/test_database.py`
+- `BEGIN` / `COMMIT` / `ROLLBACK` on a `Database` that owns the pager, pool and
+  log. Isolation is **one global lock held from begin to commit** — serializable
+  by mutual exclusion, and nothing below this layer is thread-safe anyway. 2PL or
+  MVCC would need a thread-safe buffer pool first.
+- **Milestone (met):** eight threads making 150 random transfers each between 20
+  accounts. The total is unchanged, holds across a close and reopen, and a
+  transfer that raises mid-way leaves no half-transfer behind.
+- **Trap, and it was good advice:** starting here would have been miserable. Every
+  failure the concurrency tests produced was a storage bug, not a race — because a
+  global lock makes races impossible, which is exactly why it is the right first
+  mechanism.
+- **What it caught:** a tree caches its root page id in memory, and a rolled-back
+  transaction can move it — to a page the rollback then un-allocated. The durable
+  meta slot is the truth; the in-memory copy has to be re-read from it after every
+  rollback.
+- **Cost, stated plainly:** no two transactions ever run at once, readers
+  included.
 
 ## Layer 7 — SQL
 

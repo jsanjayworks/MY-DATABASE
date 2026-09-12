@@ -15,7 +15,7 @@ there and can explain.
 | 3. Records | ✅ | schemas, row codec, slotted pages, heap files |
 | 4. B+Tree | ✅ | ordered index, splits, merges, range scans |
 | 5. WAL / recovery | ✅ | page-image log, commit/rollback, checkpoints, replay |
-| 6. Transactions | ⬜ | |
+| 6. Transactions | ✅ | begin/commit/rollback, one global lock |
 | 7. SQL engine | ⬜ | |
 
 See [ROADMAP.md](ROADMAP.md) for what each layer involves and how I'll know it's

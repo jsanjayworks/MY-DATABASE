@@ -2,6 +2,7 @@
 
 from pydb.btree import BTree, BTreeError, CorruptTreeError, DuplicateKeyError
 from pydb.btree_node import CellTooLargeError
+from pydb.database import Database, TransactionError
 from pydb.buffer_pool import (
     AllFramesPinnedError,
     BufferPool,
@@ -58,4 +59,7 @@ __all__ = [
     "Wal",
     "WalError",
     "CorruptWalError",
+    # layer 6
+    "Database",
+    "TransactionError",
 ]
