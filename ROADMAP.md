@@ -25,15 +25,20 @@ Pages stop being copied off disk on every read and start living in memory.
 - **Also bit me:** `page[:3] = b"oops"` *resizes* a `bytearray`. `unpin_page`
   now rejects a frame whose length changed.
 
-## Layer 3 — Records
+## Layer 3 — Records ✅
 
 Rows get a shape: a schema, typed values, and a byte encoding inside a page.
 
+- Code: `pydb/record.py`, `pydb/slotted_page.py`, `pydb/heap.py` ·
+  Tests: `tests/test_record.py`, `tests/test_slotted_page.py`, `tests/test_heap.py`
 - Types (INT, TEXT, NULL), row encode/decode, slotted-page layout for variable
   length rows, a heap file that scans them.
-- **Milestone:** insert 10 000 rows, reopen, scan them all back in order.
-- **Trap:** deletes leave holes. Decide now whether you compact or tombstone,
-  and write it in `NOTES.md`.
+- **Milestone (met):** 10 000 variable-length rows, reopened through an 8-frame
+  pool, scanned back in insertion order.
+- **Trap:** deletes leave holes. **Decided: tombstone the slot, compact the page
+  lazily when an insert needs the space.** Compaction never moves a slot index,
+  so no row id is invalidated. Written up in `NOTES.md`.
+- **Also decided:** a row must fit in one page (4080 bytes). No overflow pages.
 
 ## Layer 4 — B+Tree
 

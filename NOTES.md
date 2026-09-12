@@ -45,6 +45,67 @@ The list is LIFO: freeing pushes onto the head, allocating pops from it. This
 means allocation reuses the most recently freed page, which is the one most
 likely to still be in the OS page cache.
 
+## Heap pages (layer 3)
+
+A table is a singly-linked chain of heap pages. Each one is a *slotted page*: a
+header, then a slot array growing forward, then free space, then row bytes
+growing backward from the end of the page.
+
+```
++--------+----------------+--------------------+---------------------+
+| header | slot array --> |     free space     | <-- rows (data)     |
++--------+----------------+--------------------+---------------------+
+0        12                                                      4096
+```
+
+| Offset | Type | Field | Meaning |
+|--------|------|-------|---------|
+| 0  | `B` | page_type | 1 = heap page. A zeroed page reads as 0, which is rejected |
+| 1  | `B` | reserved | zero |
+| 2  | `H` | slot_count | slots that exist, tombstones included |
+| 4  | `H` | free_end | offset of the lowest row byte; free space is `free_start`..`free_end` |
+| 6  | `H` | live_count | slots that are not tombstones |
+| 8  | `I` | next_page | next page in the chain, 0 for the end |
+
+`free_start` is not stored: it is always `12 + 4 * slot_count`.
+
+Each slot is `>HH` — `(offset, length)` — so the slot array starts at byte 12 and
+a row id is `(page_id, slot_index)`.
+
+**A slot with offset 0 is a tombstone.** Offset 0 is inside the header, so it can
+never be a real row, which means deletion needs no extra flag byte.
+
+## Rows (layer 3)
+
+| Part | Size | Contents |
+|------|------|----------|
+| null bitmap | `ceil(columns / 8)` | bit *i* set = column *i* is NULL |
+| values | variable | every non-NULL column, in schema order |
+
+A NULL costs one bit and is otherwise absent from the row, so a row of nulls is
+one byte. Value encodings:
+
+| Type | Encoding |
+|------|----------|
+| INT | `>q`, 8-byte signed |
+| TEXT | `>H` byte length, then UTF-8 |
+
+Text length is counted in **bytes, not characters**.
+
+### Two decisions worth writing down
+
+**Deletes tombstone, they do not compact.** `delete` clears the slot and leaves
+the row's bytes where they are; the space comes back only when the page needs it
+and `compact()` squeezes the live rows together. Compaction rewrites row bytes
+but never slot indices, which is precisely why rows are addressed by slot: no row
+id in the database is invalidated by it. A tombstoned slot *is* reused by a later
+insert on that page, so a row id is only meaningful while its row is alive — same
+contract as a pointer before a free.
+
+**A row must fit in one page**: 4096 − 12 (header) − 4 (one slot) = **4080 bytes**.
+There are no overflow pages, so a single oversized TEXT value is an error rather
+than a chain of continuation pages. Overflow pages would be a layer of their own.
+
 ## Durability
 
 `page_count` and `free_list_head` live on the meta page, so every allocate and
