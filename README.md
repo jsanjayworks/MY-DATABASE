@@ -13,7 +13,7 @@ there and can explain.
 | 1. Pager | ✅ | pages, allocation, free list, fsync |
 | 2. Buffer pool | ✅ | frames, pin/unpin, dirty write-back, clock eviction |
 | 3. Records | ✅ | schemas, row codec, slotted pages, heap files |
-| 4. B+Tree | ⬜ | |
+| 4. B+Tree | ✅ | ordered index, splits, merges, range scans |
 | 5. WAL / recovery | ⬜ | |
 | 6. Transactions | ⬜ | |
 | 7. SQL engine | ⬜ | |

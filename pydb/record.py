@@ -244,3 +244,46 @@ class Schema:
                 f"row ends mid-value: column {column.name!r} needs bytes up to "
                 f"{end} but the row is {len(view)} bytes"
             )
+
+
+# ----------------------------------------------------------------------
+# keys
+#
+# The B+Tree compares keys as raw bytes, so a typed value has to be encoded such
+# that byte order *is* value order. This is the whole reason the encoding below
+# differs from the one used for row values.
+# ----------------------------------------------------------------------
+
+INT_KEY_FORMAT = ">Q"  # unsigned, because of the sign flip below
+INT_KEY_BIAS = 2**63
+
+
+def encode_key(column_type: ColumnType, value: object) -> bytes:
+    """Turn a value into bytes that sort in the same order as the value.
+
+    For TEXT that is just UTF-8: byte order matches code point order. For INT it
+    is big-endian (most significant byte first, so comparison starts where it
+    matters) with the sign bit flipped, which maps the signed range onto the
+    unsigned one in order -- without the flip, -1 would sort above 1 because its
+    two's complement representation starts with 0xFF.
+    """
+    if value is None:
+        raise SchemaError("NULL cannot be used as a key")
+    if column_type is ColumnType.INT:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise SchemaError(f"INT key must be an int, got {type(value).__name__}")
+        if not INT_MIN <= value <= INT_MAX:
+            raise SchemaError(f"INT key {value} does not fit in 8 bytes")
+        return struct.pack(INT_KEY_FORMAT, value + INT_KEY_BIAS)
+    if not isinstance(value, str):
+        raise SchemaError(f"TEXT key must be a str, got {type(value).__name__}")
+    return value.encode("utf-8")
+
+
+def decode_key(column_type: ColumnType, key: bytes) -> object:
+    """The inverse of `encode_key`."""
+    if column_type is ColumnType.INT:
+        if len(key) != INT_SIZE:
+            raise RecordError(f"an INT key is {INT_SIZE} bytes, got {len(key)}")
+        return struct.unpack(INT_KEY_FORMAT, key)[0] - INT_KEY_BIAS
+    return str(key, "utf-8")

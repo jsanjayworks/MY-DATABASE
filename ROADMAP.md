@@ -40,19 +40,35 @@ Rows get a shape: a schema, typed values, and a byte encoding inside a page.
   so no row id is invalidated. Written up in `NOTES.md`.
 - **Also decided:** a row must fit in one page (4080 bytes). No overflow pages.
 
-## Layer 4 — B+Tree
+## Layer 4 — B+Tree ✅
 
-The hard one. Budget more time than the previous three layers combined.
+The hard one. It was.
 
+- Code: `pydb/btree_node.py`, `pydb/btree.py` ·
+  Tests: `tests/test_btree_node.py`, `tests/test_btree.py`
 - Leaf and internal node layouts, search, insert with splits, delete with
   merge/redistribute, sibling pointers for range scans.
-- **Milestone:** insert 100 000 random keys, verify every one by lookup, then
-  range-scan and confirm sorted order; delete half and re-verify.
-- **Traps:** the root split (the root is the only node allowed to be underfull,
-  and splitting it changes the root page id); off-by-one in the split point.
-- **Do this:** write a `verify_invariants()` that walks the whole tree checking
-  key order, node fill, and parent/child links. Call it after every operation in
-  tests. It will save you days.
+- **Milestone (met):** 100 000 random keys inserted, every one verified by
+  lookup, range-scanned in sorted order, reopened, then half deleted and
+  re-verified — with the invariant checker run over the whole tree at each stage.
+- **Traps, as advertised:** the root split changes the root page id, so nothing
+  may cache it (`on_root_change` exists for exactly this, and there is a test
+  showing what a stale root loses). Merging is tried before borrowing, because
+  merging only *removes* a separator from the parent while borrowing rewrites one
+  and can need room the parent does not have.
+- **Did this, and it paid for itself:** `verify_invariants()` walks the tree
+  checking key order, per-subtree key bounds, uniform leaf depth, node fill, and
+  that the leaf chain visits exactly the leaves left to right. Called after every
+  mutation in the tests.
+- **What it caught:** (1) `MAX_CELL_SIZE` and `MIN_USED` cannot be chosen
+  independently — with cells up to a quarter of a page, a *split* can leave a half
+  below a third full, so the invariant was violated by correct code. Capping a
+  cell at an eighth of a page and the threshold at a fifth makes the arithmetic
+  work out (see `NOTES.md`). (2) Replacing a value with a shorter one shrinks a
+  node exactly as a delete does, so the *insert* path has to be able to rebalance
+  too. (3) A buffer pool bug from layer 2: a frame emptied by `free_page` never
+  rejoined the free list, which only became reachable once the tree started
+  freeing pages.
 
 ## Layer 5 — Durability (WAL)
 

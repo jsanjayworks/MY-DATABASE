@@ -345,12 +345,11 @@ class BufferPool:
 
     def _claim_frame(self) -> Frame:
         """Return an empty frame, evicting something if necessary."""
-        if self._free:
-            return self._free.pop()
-        victim = self._find_victim()
-        self._evict(victim, flush=True)
-        self.stats.evictions += 1
-        return victim
+        if not self._free:
+            victim = self._find_victim()
+            self._evict(victim, flush=True)  # which puts it back on the free list
+            self.stats.evictions += 1
+        return self._free.pop()
 
     def _find_victim(self) -> Frame:
         """Clock sweep: the first unpinned frame whose reference bit is clear.
@@ -361,6 +360,10 @@ class BufferPool:
         for _ in range(2 * self.capacity):
             frame = self._frames[self._hand]
             self._hand = (self._hand + 1) % self.capacity
+            assert frame.page_id != NULL_PAGE_ID, (
+                f"{frame!r} holds nothing but is not on the free list; every "
+                f"path that empties a frame must return it there"
+            )
             if frame.pin_count > 0:
                 continue
             if frame.referenced:
@@ -373,6 +376,13 @@ class BufferPool:
         )
 
     def _evict(self, frame: Frame, flush: bool) -> None:
+        """Empty `frame` and put it back on the free list.
+
+        Both callers rely on that last part: `_claim_frame` pops the frame it just
+        emptied, and `free_page` would otherwise strand a frame that holds nothing
+        yet is invisible to the free list -- leaving the clock hand to trip over
+        it later, a long way from the code that caused it.
+        """
         assert frame.pin_count == 0, f"evicting pinned {frame!r}"
         if flush and frame.dirty:
             self._write_back(frame)
@@ -380,6 +390,7 @@ class BufferPool:
         frame.page_id = NULL_PAGE_ID
         frame.dirty = False
         frame.referenced = False
+        self._free.append(frame)
 
     def _write_back(self, frame: Frame) -> None:
         self.pager.write_page(frame.page_id, frame.data)

@@ -106,6 +106,85 @@ contract as a pointer before a free.
 There are no overflow pages, so a single oversized TEXT value is an error rather
 than a chain of continuation pages. Overflow pages would be a layer of their own.
 
+## B+Tree nodes (layer 4)
+
+Physically the same idea as a heap page — a pointer array growing forward, cell
+bytes growing backward — with one crucial difference: **the pointer array is in
+key order**. Inserting in the middle of a node shifts a few bytes of pointer
+array, not kilobytes of cells.
+
+| Offset | Type | Field | Meaning |
+|--------|------|-------|---------|
+| 0  | `B` | page_type | 2 = internal, 3 = leaf |
+| 1  | `B` | reserved | zero |
+| 2  | `H` | cell_count | cells in this node |
+| 4  | `H` | cell_start | offset of the lowest cell byte |
+| 6  | `H` | frag_bytes | dead bytes inside the cell area, reclaimed by defragmenting |
+| 8  | `I` | extra | **leaf:** next leaf page id, 0 at the end. **internal:** leftmost child |
+
+Each pointer is `>HH` — `(offset, length)`. Cells:
+
+| Node | Cell contents |
+|------|---------------|
+| leaf | `>H key_len`, key, value (the value is the rest of the cell) |
+| internal | `>H key_len`, key, `>I child_page_id` |
+
+Both start with a length-prefixed key, so key comparison does not care which
+kind of node it is reading.
+
+An internal node with *n* cells has *n + 1* children, and the ordering invariant
+is:
+
+```
+child_at(0) < cells[0].key <= child_at(1) < cells[1].key <= child_at(2) ...
+```
+
+so a separator key is the **smallest key of the subtree to its right**, and a
+search for a key equal to a separator goes right.
+
+### Two constants that have to agree
+
+| Name | Value | Meaning |
+|------|-------|---------|
+| `MAX_CELL_SIZE` | 506 | an eighth of a page, minus the pointer |
+| `MIN_USED` | 816 | a fifth of a page: below this a non-root node is *underfull* |
+
+These are a pair, not two independent knobs. A node splits only when a cell will
+not fit, so the cells being divided total more than the 4084 usable bytes; the
+cut lands on a cell boundary at or just past the halfway mark, which leaves the
+smaller half above `4085/2 − 506 − 506 ≈ 1022` bytes (an internal split also
+gives a cell away to its parent, hence subtracting twice). Any threshold below
+that is one a fresh split can never violate — which is what makes "no non-root
+node is underfull" an invariant `verify_invariants()` can actually assert.
+
+The same cap makes rebalancing always possible: `4084 − 816` is far more than one
+cell, so a node below the threshold always has room for a whole cell from its
+sibling.
+
+Consequence: **a tree value is capped at ~496 bytes.** That is deliberate. The
+tree stores keys and row ids; a real value lives in the heap.
+
+### Keys are bytes
+
+The tree compares keys with plain byte comparison, so typed values are encoded to
+sort correctly (`record.encode_key`):
+
+| Type | Key encoding |
+|------|--------------|
+| INT | big-endian 8 bytes with the sign bit flipped (`value + 2^63`) |
+| TEXT | UTF-8 |
+
+The sign flip is the interesting one: without it, −1 (`0xFF...`) would sort above
+1. Big-endian matters too — comparison has to start at the most significant byte.
+
+### The root page id moves
+
+Splitting the root allocates a new one, and collapsing an underfull root frees
+it, so **the root page id is not stable**. Nothing may cache it: `BTree` reports
+every change through `on_root_change`, and whatever owns the tree writes the new
+id somewhere durable. A tree reopened with a stale root id is silently missing
+most of itself.
+
 ## Durability
 
 `page_count` and `free_list_head` live on the meta page, so every allocate and

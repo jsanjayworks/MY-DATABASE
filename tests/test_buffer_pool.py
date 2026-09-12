@@ -250,6 +250,19 @@ class TestAllocation(PoolTestCase):
         self.assertNotIn(page_id, pool.resident_pages())
         self.assertEqual(pool.pager.free_pages(), [page_id])
 
+    def test_a_freed_page_gives_its_frame_back_to_the_pool(self):
+        """A frame emptied by `free_page` has to rejoin the free list.
+
+        It did not, once. The pool went on working until the clock hand reached
+        the stranded frame -- a crash in eviction, pages later, with nothing to
+        connect it to the free that caused it.
+        """
+        pool = self.pool(capacity=2)
+        ids = self.fill(pool, 2)
+        pool.free_page(ids[0])
+        self.fill(pool, 2)  # must not trip over the emptied frame
+        self.assertEqual(len(pool.resident_pages()), 2)
+
     def test_cannot_free_a_pinned_page(self):
         pool = self.pool()
         page_id = self.fill(pool, 1)[0]

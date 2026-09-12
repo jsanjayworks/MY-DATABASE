@@ -57,6 +57,10 @@ class Pager:
         self.path = os.fspath(path)
         self.page_count = 1  # page 0 (meta) always exists
         self.free_list_head = NULL_PAGE_ID
+        # The free list mirrored in memory. Walking the on-disk list to catch a
+        # double free costs a page read per free page, which turns freeing a lot
+        # of pages into a quadratic disk grind; a set makes the check O(1).
+        self._free_set: set[int] = set()
         self._file = None
         self._open()
 
@@ -141,6 +145,7 @@ class Pager:
             raise CorruptFileError(f"{self.path}: impossible page count {page_count}")
         self.page_count = page_count
         self.free_list_head = free_head
+        self._free_set = set(self.free_pages())  # one walk, at open
 
     def _write_meta(self) -> None:
         header = struct.pack(
@@ -208,6 +213,7 @@ class Pager:
         if self.free_list_head != NULL_PAGE_ID:
             page_id = self.free_list_head
             self.free_list_head = self._next_free(page_id)
+            self._free_set.discard(page_id)
         else:
             page_id = self.page_count
             self.page_count += 1
@@ -220,13 +226,14 @@ class Pager:
         self._check_page_id(page_id)
         if page_id == META_PAGE_ID:
             raise PagerError("cannot free the meta page")
-        if page_id in self.free_pages():
+        if page_id in self._free_set:
             raise PagerError(f"page {page_id} is already free (double free)")
         # Push onto the head of the list: the freed page points at the old head.
         page = bytearray(PAGE_SIZE)
         struct.pack_into(FREE_NEXT_FORMAT, page, 0, self.free_list_head)
         self._write_page_raw(page_id, page)
         self.free_list_head = page_id
+        self._free_set.add(page_id)
         self._write_meta()
 
     def free_pages(self) -> list[int]:
