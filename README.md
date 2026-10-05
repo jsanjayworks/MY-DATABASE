@@ -1,5 +1,7 @@
 # MY-DATABASE
 
+[![tests](https://github.com/jsanjayworks/MY-DATABASE/actions/workflows/tests.yml/badge.svg)](https://github.com/jsanjayworks/MY-DATABASE/actions/workflows/tests.yml)
+
 A SQL database written from scratch in Python, no third-party dependencies —
 built while following [Code With Sep's *Write a database from scratch*](https://www.youtube.com/watch?v=HHO2K23XxbM).
 
