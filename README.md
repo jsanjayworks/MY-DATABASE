@@ -180,3 +180,7 @@ pydb/
   repl.py          layer 7  the shell
 tests/             one file per module, and every milestone
 ```
+
+## License
+
+MIT. See [LICENSE](LICENSE).
