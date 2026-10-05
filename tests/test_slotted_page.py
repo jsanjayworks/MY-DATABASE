@@ -1,15 +1,3 @@
-"""Tests for layer 3b, the slotted page.
-
-These run on a bare `bytearray` rather than a real page from the pool -- the
-slotted page does not know or care where its bytes came from, and testing it in
-isolation means a failure here is never a buffer pool bug.
-
-`verify()` is called after almost every mutation. That is the habit the roadmap
-recommends for the B+Tree, and it is worth starting one layer early.
-
-Run with:  python -m unittest discover -s tests -v
-"""
-
 from __future__ import annotations
 
 import os
@@ -18,8 +6,8 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from pydb.pager import PAGE_SIZE  # noqa: E402
-from pydb.slotted_page import (  # noqa: E402
+from pydb.pager import PAGE_SIZE
+from pydb.slotted_page import (
     HEADER_SIZE,
     MAX_ROW_SIZE,
     SLOT_SIZE,
@@ -35,7 +23,7 @@ class SlottedPageTestCase(unittest.TestCase):
         self.page = SlottedPage.initialize(bytearray(PAGE_SIZE))
 
     def tearDown(self) -> None:
-        self.page.verify()  # every test leaves the page consistent
+        self.page.verify()
 
     def insert_all(self, *rows: bytes) -> list[int]:
         return [self.page.insert(row) for row in rows]
@@ -59,7 +47,6 @@ class TestEmptyPage(SlottedPageTestCase):
             SlottedPage(bytearray(100))
 
     def test_refuses_a_page_that_was_never_initialised(self):
-        """Page type 0 is what a zeroed page looks like. Catch it, do not parse it."""
         with self.assertRaises(SlottedPageError):
             SlottedPage(bytearray(PAGE_SIZE))
 
@@ -98,7 +85,6 @@ class TestInsertAndRead(SlottedPageTestCase):
         )
 
     def test_fills_a_page_to_the_last_byte(self):
-        """The arithmetic has to be exact, so store the largest possible row."""
         slot = self.page.insert(b"z" * MAX_ROW_SIZE)
         self.assertEqual(self.page.free_space, 0)
         self.assertEqual(len(self.page.read(slot)), MAX_ROW_SIZE)
@@ -137,7 +123,6 @@ class TestDelete(SlottedPageTestCase):
             self.page.delete(slot)
 
     def test_delete_does_not_reclaim_space_on_its_own(self):
-        """The tombstone decision, made visible: deletes leave dead bytes behind."""
         slot = self.page.insert(b"x" * 100)
         free_before = self.page.free_space
         self.page.delete(slot)
@@ -164,7 +149,6 @@ class TestCompaction(SlottedPageTestCase):
         self.assertEqual(len(self.page), 5)
 
     def test_compaction_moves_bytes_but_never_slot_indices(self):
-        """The whole point of slot addressing: row ids survive compaction."""
         a, b, c = self.insert_all(b"first", b"second", b"third")
         self.page.delete(b)
         offset_before = self.page._slot(c)[0]
@@ -174,7 +158,6 @@ class TestCompaction(SlottedPageTestCase):
         self.assertNotEqual(self.page._slot(c)[0], offset_before)
 
     def test_compaction_zeroes_the_space_it_reclaims(self):
-        """A deleted row's bytes should not survive in the file."""
         self.page.insert(b"keep")
         secret = self.page.insert(b"SECRET-VALUE")
         self.page.delete(secret)
@@ -183,11 +166,11 @@ class TestCompaction(SlottedPageTestCase):
 
     def test_insert_compacts_automatically_when_that_is_the_only_way(self):
         big = b"x" * 1000
-        slots = self.insert_all(big, big, big, big)  # 4000 of 4084 bytes
+        slots = self.insert_all(big, big, big, big)
         self.page.delete(slots[0])
         self.page.delete(slots[2])
         self.assertLess(self.page.free_space, len(big))
-        slot = self.page.insert(b"y" * 1500)  # only fits after compaction
+        slot = self.page.insert(b"y" * 1500)
         self.assertEqual(self.page.read(slot), b"y" * 1500)
         self.assertEqual(len(self.page), 3)
 
@@ -219,8 +202,6 @@ class TestReplace(SlottedPageTestCase):
         self.assertEqual(self.page.read(slot), b"tiny")
 
     def test_replace_reuses_the_row_it_is_replacing_as_free_space(self):
-        """Growing a row on an otherwise full page still works: the old row's
-        own bytes are reclaimable."""
         slot = self.page.insert(b"x" * (MAX_ROW_SIZE - 10))
         self.assertTrue(self.page.replace(slot, b"y" * MAX_ROW_SIZE))
         self.assertEqual(self.page.read(slot), b"y" * MAX_ROW_SIZE)
@@ -245,7 +226,7 @@ class TestVerify(SlottedPageTestCase):
         self.page._set(6, 5)
         with self.assertRaises(SlottedPageError):
             self.page.verify()
-        self.page._set(6, 1)  # repair, so tearDown's verify passes
+        self.page._set(6, 1)
 
     def test_verify_catches_a_slot_pointing_into_free_space(self):
         slot = self.page.insert(b"row")

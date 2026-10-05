@@ -1,16 +1,3 @@
-"""Layer 3a: schemas and row encoding.
-
-Layers 1 and 2 move anonymous 4 KB blocks around. This is where bytes start
-meaning something: a `Schema` is an ordered list of typed columns, and it knows
-how to turn a Python tuple into the exact bytes that go in a page and back.
-
-Three types, which is enough to build a database on: INT, TEXT, and NULL -- NULL
-being a property of a value rather than a type of its own, tracked in a bitmap at
-the front of every row so a null costs one bit instead of a whole field.
-
-The byte layout is documented in NOTES.md.
-"""
-
 from __future__ import annotations
 
 import struct
@@ -20,27 +7,25 @@ from typing import Iterator, Sequence
 
 from pydb.errors import PydbError
 
-INT_FORMAT = ">q"  # 8-byte signed, so it can hold any SQLite-ish INTEGER
+INT_FORMAT = ">q"
 INT_SIZE = struct.calcsize(INT_FORMAT)
 INT_MIN = -(2**63)
 INT_MAX = 2**63 - 1
 
-TEXT_LEN_FORMAT = ">H"  # 2-byte length prefix
+TEXT_LEN_FORMAT = ">H"
 TEXT_LEN_SIZE = struct.calcsize(TEXT_LEN_FORMAT)
 TEXT_MAX_LEN = 2**16 - 1
 
 
 class RecordError(PydbError):
-    """Base class for schema and encoding errors."""
+    pass
 
 
 class SchemaError(RecordError):
-    """A value does not match the column it is being stored in."""
+    pass
 
 
 class ColumnType(IntEnum):
-    """The type tags. The integer values are written to disk by the catalog."""
-
     INT = 1
     TEXT = 2
 
@@ -49,7 +34,6 @@ class ColumnType(IntEnum):
 
     @classmethod
     def parse(cls, name: str) -> "ColumnType":
-        """Accept the SQL spellings a user is likely to type."""
         key = name.strip().upper()
         aliases = {
             "INT": cls.INT,
@@ -75,14 +59,6 @@ class Column:
 
 
 class Schema:
-    """An ordered list of named, typed columns, and the row codec for it.
-
-        >>> schema = Schema([Column("id", ColumnType.INT, nullable=False),
-        ...                  Column("name", ColumnType.TEXT)])
-        >>> schema.decode(schema.encode((1, "ada")))
-        (1, 'ada')
-    """
-
     __slots__ = ("columns", "_index", "_null_bytes")
 
     def __init__(self, columns: Sequence[Column]) -> None:
@@ -94,22 +70,16 @@ class Schema:
             raise SchemaError(f"duplicate column name(s): {sorted(duplicates)}")
         self.columns = tuple(columns)
         self._index = {c.name: i for i, c in enumerate(self.columns)}
-        # One bit per column, rounded up to whole bytes.
         self._null_bytes = (len(self.columns) + 7) // 8
 
     @classmethod
     def of(cls, *specs: tuple) -> "Schema":
-        """Terse constructor for tests: `Schema.of(("id", "INT", False), ...)`."""
         columns = []
         for spec in specs:
             name, type_name, *rest = spec
             nullable = rest[0] if rest else True
             columns.append(Column(name, ColumnType.parse(type_name), nullable))
         return cls(columns)
-
-    # ------------------------------------------------------------------
-    # column lookup
-    # ------------------------------------------------------------------
 
     def __len__(self) -> int:
         return len(self.columns)
@@ -133,7 +103,6 @@ class Schema:
         return tuple(c.name for c in self.columns)
 
     def index(self, name: str) -> int:
-        """Position of `name`, raising `SchemaError` rather than `KeyError`."""
         try:
             return self._index[name]
         except KeyError:
@@ -144,12 +113,7 @@ class Schema:
     def has(self, name: str) -> bool:
         return name in self._index
 
-    # ------------------------------------------------------------------
-    # encoding
-    # ------------------------------------------------------------------
-
     def encode(self, values: Sequence[object]) -> bytes:
-        """Pack one row. Raises `SchemaError` if the tuple does not fit the schema."""
         if len(values) != len(self.columns):
             raise SchemaError(
                 f"expected {len(self.columns)} values {list(self.names)}, "
@@ -167,7 +131,6 @@ class Schema:
         return bytes(null_bits) + b"".join(parts)
 
     def decode(self, data: bytes | bytearray | memoryview) -> tuple:
-        """Unpack one row. `data` may be longer than the row; the tail is ignored."""
         view = memoryview(data)
         if len(view) < self._null_bytes:
             raise RecordError(
@@ -186,7 +149,6 @@ class Schema:
         return tuple(values)
 
     def encoded_size(self, values: Sequence[object]) -> int:
-        """Bytes `encode(values)` will produce, without building them."""
         size = self._null_bytes
         for column, value in zip(self.columns, values):
             if value is None:
@@ -248,27 +210,11 @@ class Schema:
             )
 
 
-# ----------------------------------------------------------------------
-# keys
-#
-# The B+Tree compares keys as raw bytes, so a typed value has to be encoded such
-# that byte order *is* value order. This is the whole reason the encoding below
-# differs from the one used for row values.
-# ----------------------------------------------------------------------
-
-INT_KEY_FORMAT = ">Q"  # unsigned, because of the sign flip below
+INT_KEY_FORMAT = ">Q"
 INT_KEY_BIAS = 2**63
 
 
 def encode_key(column_type: ColumnType, value: object) -> bytes:
-    """Turn a value into bytes that sort in the same order as the value.
-
-    For TEXT that is just UTF-8: byte order matches code point order. For INT it
-    is big-endian (most significant byte first, so comparison starts where it
-    matters) with the sign bit flipped, which maps the signed range onto the
-    unsigned one in order -- without the flip, -1 would sort above 1 because its
-    two's complement representation starts with 0xFF.
-    """
     if value is None:
         raise SchemaError("NULL cannot be used as a key")
     if column_type is ColumnType.INT:
@@ -283,7 +229,6 @@ def encode_key(column_type: ColumnType, value: object) -> bytes:
 
 
 def decode_key(column_type: ColumnType, key: bytes) -> object:
-    """The inverse of `encode_key`."""
     if column_type is ColumnType.INT:
         if len(key) != INT_SIZE:
             raise RecordError(f"an INT key is {INT_SIZE} bytes, got {len(key)}")

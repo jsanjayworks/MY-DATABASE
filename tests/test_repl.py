@@ -1,13 +1,3 @@
-"""Tests for layer 7g, the REPL -- and the layer 7 milestone.
-
-Most of these drive the loop in-process with `StringIO` standing in for a
-terminal, which is enough for everything except the milestone. The milestone
-specifically requires the process to *restart*, so it runs `python -m pydb` twice
-over the same file: nothing proves persistence like a second process.
-
-Run with:  python -m unittest discover -s tests -v
-"""
-
 from __future__ import annotations
 
 import io
@@ -21,9 +11,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-from pydb.database import Database  # noqa: E402
-from pydb.repl import Repl, format_table  # noqa: E402
-from pydb.sql import Engine, Result  # noqa: E402
+from pydb.database import Database
+from pydb.repl import Repl, format_table
+from pydb.sql import Engine, Result
 
 
 class ReplTestCase(unittest.TestCase):
@@ -33,7 +23,6 @@ class ReplTestCase(unittest.TestCase):
         self.path = os.path.join(self._tmp.name, "test.db")
 
     def session(self, script: str) -> tuple[str, int]:
-        """Run `script` through the REPL. Returns the output and the failure count."""
         with Database(self.path) as db:
             output = io.StringIO()
             repl = Repl(
@@ -180,7 +169,6 @@ class TestErrorHandling(ReplTestCase):
         self.assertIn("(0 rows)", output)
 
     def test_a_bug_in_pydb_is_labelled_as_one(self):
-        """A refused statement and a broken database are different news."""
         with Database(self.path) as db:
             engine = Engine(db)
             engine.execute("CREATE TABLE t (id INT PRIMARY KEY)")
@@ -203,7 +191,7 @@ class TestErrorHandling(ReplTestCase):
         lines = output.getvalue().splitlines()
         self.assertEqual(failures, 2)
         self.assertTrue(lines[0].startswith("internal error (TypeError):"), lines)
-        self.assertTrue(lines[1].startswith("error: "), lines)  # a duplicate key
+        self.assertTrue(lines[1].startswith("error: "), lines)
 
     def test_a_type_error_names_the_column(self):
         output, failures = self.session(
@@ -226,13 +214,6 @@ class TestErrorHandling(ReplTestCase):
 
 
 class TestMilestone(ReplTestCase):
-    """The layer 7 milestone from ROADMAP.md.
-
-    A REPL session that creates a table, inserts rows, **restarts the process**,
-    and queries them back. Two `python -m pydb` invocations over one file, so
-    nothing can be hiding in memory.
-    """
-
     def repl_process(self, script: str) -> subprocess.CompletedProcess:
         return subprocess.run(
             [sys.executable, "-m", "pydb", self.path],
@@ -254,7 +235,6 @@ class TestMilestone(ReplTestCase):
         self.assertEqual(first.returncode, 0, first.stderr)
         self.assertIn("(3 rows)", first.stdout)
 
-        # A whole new process, reading the file the first one left behind.
         second = self.repl_process(
             ".tables\n"
             ".schema people\n"
@@ -271,7 +251,6 @@ class TestMilestone(ReplTestCase):
         self.assertIn("NULL", second.stdout)
         self.assertIn("(3 rows)", second.stdout)
 
-        # And it is still writable, which a read-only kind of "working" would hide.
         third = self.repl_process(
             "INSERT INTO people VALUES (4, 'dee', 22);\n"
             "UPDATE people SET age = 37 WHERE id = 1;\n"

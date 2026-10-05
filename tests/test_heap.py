@@ -1,13 +1,3 @@
-"""Tests for layer 3c, the heap file.
-
-This is the first layer where all the pieces below are involved at once, so the
-tests that matter most are the ones that close the database and reopen it: if the
-pager, the pool, the page layout and the row codec disagree about a single byte,
-a reopened scan is where it shows up.
-
-Run with:  python -m unittest discover -s tests -v
-"""
-
 from __future__ import annotations
 
 import os
@@ -18,10 +8,10 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from pydb.buffer_pool import BufferPool  # noqa: E402
-from pydb.heap import HeapFile, RowId, RowNotFoundError  # noqa: E402
-from pydb.record import Schema  # noqa: E402
-from pydb.slotted_page import MAX_ROW_SIZE, NoRoomError  # noqa: E402
+from pydb.buffer_pool import BufferPool
+from pydb.heap import HeapFile, RowId, RowNotFoundError
+from pydb.record import Schema
+from pydb.slotted_page import MAX_ROW_SIZE, NoRoomError
 
 SCHEMA = Schema.of(("id", "INT", False), ("name", "TEXT"), ("age", "INT"))
 
@@ -40,7 +30,6 @@ class HeapTestCase(unittest.TestCase):
         self.pool.assert_no_pins()
 
     def reopen(self, capacity: int = 16) -> HeapFile:
-        """Close everything and open the same heap again, as a new process would."""
         first_page_id = self.heap.first_page_id
         self.pool.close()
         self.pool = BufferPool.open(self.path, capacity=capacity)
@@ -82,10 +71,10 @@ class TestInsertAndGet(HeapTestCase):
 class TestGrowth(HeapTestCase):
     def test_the_heap_chains_a_new_page_when_the_first_one_fills(self):
         self.assertEqual(len(self.heap.page_ids), 1)
-        for i in range(200):  # ~30 bytes each, comfortably more than one page
+        for i in range(200):
             self.heap.insert((i, f"name-{i:04d}", i))
         self.assertGreater(len(self.heap.page_ids), 1)
-        self.heap.verify()  # the chain in the file matches the one in memory
+        self.heap.verify()
 
     def test_every_row_is_findable_after_the_heap_spans_pages(self):
         rids = {i: self.heap.insert((i, f"name-{i:04d}", i)) for i in range(500)}
@@ -119,7 +108,6 @@ class TestDelete(HeapTestCase):
             self.heap.delete(rid)
 
     def test_space_from_deletes_is_reused_instead_of_growing_the_file(self):
-        """A delete has to put its page back in play, or the heap grows forever."""
         filler = "x" * 500
         rids = [self.heap.insert((i, filler, i)) for i in range(100)]
         pages_before = len(self.heap.page_ids)
@@ -180,8 +168,6 @@ class TestScan(HeapTestCase):
         self.assertEqual(order, list(self.heap.page_ids))
 
     def test_scan_holds_no_pins_while_the_consumer_is_slow(self):
-        """A scan must not pin a page across a yield, or a slow consumer with a
-        small pool would deadlock the whole database."""
         for i in range(300):
             self.heap.insert((i, f"name-{i}", i))
         for _rid, _row in self.heap.scan():
@@ -203,7 +189,6 @@ class TestPersistence(HeapTestCase):
         pages = self.heap.page_ids
         self.reopen()
         self.assertEqual(self.heap.page_ids, pages)
-        # The rebuilt free-space map must still find the room a delete freed.
         rid, _ = next(iter(self.heap.scan()))
         self.heap.delete(rid)
         self.heap.insert((999, "late arrival", 999))
@@ -219,13 +204,10 @@ class TestPersistence(HeapTestCase):
 
 
 class TestMilestone(HeapTestCase):
-    """The layer 3 milestone from ROADMAP.md: insert 10 000 rows, reopen, scan
-    them all back in order."""
-
     ROWS = 10_000
 
     def test_ten_thousand_rows_reopen_and_scan_in_order(self):
-        random.seed(3)  # varied row sizes, same sizes on every run
+        random.seed(3)
         expected = [
             (i, "x" * random.randint(0, 200), None if i % 7 == 0 else i)
             for i in range(self.ROWS)
@@ -234,7 +216,7 @@ class TestMilestone(HeapTestCase):
             self.heap.insert(row)
 
         self.assertEqual(len(self.heap), self.ROWS)
-        self.reopen(capacity=8)  # a pool far too small to hold the table
+        self.reopen(capacity=8)
 
         scanned = list(self.heap)
         self.assertEqual(len(scanned), self.ROWS)
@@ -250,7 +232,7 @@ class TestMilestone(HeapTestCase):
         self.assertEqual(len(self.heap), 1000)
 
         pages_before = len(self.heap.page_ids)
-        for i in range(1000):  # same encoded size as the rows we deleted
+        for i in range(1000):
             self.heap.insert((-i, f"name-{i:05d}", i))
         self.assertEqual(len(self.heap), 2000)
         self.assertLessEqual(

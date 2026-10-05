@@ -1,17 +1,3 @@
-"""Tests for layer 7a, the catalog and its tables.
-
-The catalog is a table of tables, stored in the database it describes, so the
-question every test here is really asking is: does the database still know what it
-contains after being closed and reopened?
-
-`Table.verify()` is the counterpart to the B+Tree's invariant check: it asserts
-the heap and the index agree about every row. An insert that updates one and not
-the other produces a table that answers the same query differently depending on
-the plan, which is a horrible bug to find any other way.
-
-Run with:  python -m unittest discover -s tests -v
-"""
-
 from __future__ import annotations
 
 import os
@@ -21,8 +7,8 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from pydb.btree import DuplicateKeyError  # noqa: E402
-from pydb.catalog import (  # noqa: E402
+from pydb.btree import DuplicateKeyError
+from pydb.catalog import (
     Catalog,
     CatalogError,
     IndexInfo,
@@ -30,8 +16,8 @@ from pydb.catalog import (  # noqa: E402
     TableInfo,
     UnknownTableError,
 )
-from pydb.database import Database  # noqa: E402
-from pydb.record import Schema, SchemaError  # noqa: E402
+from pydb.database import Database
+from pydb.record import Schema, SchemaError
 
 PEOPLE = Schema.of(("id", "INT", False), ("name", "TEXT"), ("age", "INT"))
 
@@ -251,9 +237,6 @@ class TestRows(CatalogTestCase):
 
 
 class TestRollback(CatalogTestCase):
-    """Cached page ids are the trap here, and there are three of them: the index
-    root, the heap's page chain, and the catalog record itself."""
-
     def test_a_rolled_back_create_table_leaves_no_table(self):
         with self.assertRaises(RuntimeError):
             with self.db.transaction():
@@ -269,7 +252,7 @@ class TestRollback(CatalogTestCase):
 
         with self.assertRaises(RuntimeError):
             with self.db.transaction():
-                for i in range(2, 400):  # enough to split the tree and grow the heap
+                for i in range(2, 400):
                     table.insert((i, f"gone-{i}", i))
                 raise RuntimeError
 
@@ -282,9 +265,6 @@ class TestRollback(CatalogTestCase):
         self.assertEqual(table.lookup(2)[1][1], "after the rollback")
 
     def test_the_cached_index_root_still_agrees_with_the_catalog_after_a_rollback(self):
-        """The index root is cached in two places -- the tree object and the
-        catalog record -- and a rolled-back transaction that split the tree must
-        not leave them disagreeing."""
         table = self.catalog.create_table("people", PEOPLE, primary_key="id")
         with self.db.transaction():
             for i in range(200):
@@ -293,7 +273,7 @@ class TestRollback(CatalogTestCase):
 
         with self.assertRaises(RuntimeError):
             with self.db.transaction():
-                for i in range(200, 600):  # splits leaves, allocating index pages
+                for i in range(200, 600):
                     table.insert((i, f"name-{i}", i))
                 raise RuntimeError
 
@@ -305,8 +285,6 @@ class TestRollback(CatalogTestCase):
         self.assertEqual(len(list(table.scan())), 200)
 
     def test_a_transaction_larger_than_the_pool_is_refused_not_half_applied(self):
-        """The no-steal limit from layer 5, reached through SQL-level machinery.
-        The table has to be intact afterwards."""
         from pydb.buffer_pool import AllFramesPinnedError
 
         table = self.catalog.create_table("people", PEOPLE, primary_key="id")

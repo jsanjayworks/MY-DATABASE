@@ -1,13 +1,3 @@
-"""Tests for layer 3a, schemas and row encoding.
-
-Encoding is the one place where a bug is invisible until much later: a row that
-encodes wrongly still writes, still reads back, and only surfaces as nonsense
-three layers up. So these tests are mostly round-trips, plus the edges where
-`struct` would happily do the wrong thing.
-
-Run with:  python -m unittest discover -s tests -v
-"""
-
 from __future__ import annotations
 
 import os
@@ -16,7 +6,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from pydb.record import (  # noqa: E402
+from pydb.record import (
     INT_MAX,
     INT_MIN,
     TEXT_MAX_LEN,
@@ -75,7 +65,6 @@ class TestRoundTrip(unittest.TestCase):
         self.assert_round_trips((1, None, None))
 
     def test_round_trips_an_empty_string(self):
-        """An empty string is not NULL, and the difference must survive a round trip."""
         encoded = self.assert_round_trips((1, "", 0))
         self.assertEqual(self.schema.decode(encoded)[1], "")
         self.assertIsNotNone(self.schema.decode(encoded)[1])
@@ -90,10 +79,9 @@ class TestRoundTrip(unittest.TestCase):
 
     def test_multibyte_text_is_measured_in_bytes_not_characters(self):
         schema = Schema.of(("t", "TEXT"))
-        self.assertEqual(len(schema.encode(("é",))), 1 + 2 + 2)  # bitmap, len, utf-8
+        self.assertEqual(len(schema.encode(("é",))), 1 + 2 + 2)
 
     def test_decode_ignores_trailing_bytes(self):
-        """A slot is exact, but a page buffer is not: decode must stop on its own."""
         encoded = self.schema.encode((7, "bob", 1))
         self.assertEqual(self.schema.decode(encoded + b"garbage"), (7, "bob", 1))
 
@@ -127,7 +115,6 @@ class TestValidation(unittest.TestCase):
             self.schema.encode((1, 2))
 
     def test_rejects_a_bool_in_an_int_column(self):
-        """`True` is an `int` in Python. Storing it as 1 silently loses the type."""
         with self.assertRaises(SchemaError):
             self.schema.encode((True, "a"))
 

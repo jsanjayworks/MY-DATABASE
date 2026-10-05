@@ -1,36 +1,3 @@
-"""Layer 7e: the planner and the executor.
-
-The planner's real job is choosing an **access path** per table: how to get rows
-out of it before anything is done to them. There are four, and the difference
-between the first and the last is the difference between a database and a file:
-
-* `seek` -- `WHERE id = 42` on an indexed column. One descent of a B+Tree, then
-  one heap read per match. A handful of pages whatever the table's size.
-* `range` -- `WHERE id > 100` on an indexed column. Descend once, walk the leaf
-  chain, stop at the bound.
-* `probe` -- the inner table of a join whose `ON` condition is an equality against
-  an indexed column: `a JOIN b ON b.id = a.b_id` seeks into `b`'s index once per
-  row of `a`. This is an *index nested-loop join*, and it is the difference between
-  a join that scales and one that squares.
-* `scan` -- everything else. Every page of the table.
-
-Above the access paths everything is a chain of generators -- join, filter, group,
-project, distinct, sort, limit -- each pulling from the one below. That is the
-classic iterator (or "volcano") model, and it has a property worth the structure:
-a `LIMIT 5` stops pulling after five rows, so the scan underneath stops too. Only
-`ORDER BY` and `GROUP BY` have to break the chain, because neither can emit
-anything until it has seen everything.
-
-Two things about correctness that look like bugs and are not:
-
-* Comparisons use SQL's **three-valued logic**. A comparison against NULL is
-  neither true nor false but unknown, and `WHERE` keeps only rows that are
-  definitely true -- so a row with a NULL `age` satisfies neither `age = 41` nor
-  `age != 41`.
-* An index never contains rows whose indexed column is NULL, which is safe for
-  exactly that reason: no condition an index is used for can be true of NULL.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -42,38 +9,25 @@ from pydb.record import ColumnType
 from pydb.sql import nodes
 from pydb.sql.errors import PlanError, ValueTypeError
 
-UNKNOWN = None  # the third truth value, kept explicit rather than implied
-
-
-# ----------------------------------------------------------------------
-# column resolution
-# ----------------------------------------------------------------------
+UNKNOWN = None
 
 
 @dataclass
 class BoundColumn:
-    label: str  # the table's name or alias inside the query
+    label: str
     name: str
     type: ColumnType
-    position: int  # which source it came from
-    index: int  # its offset in the combined row
+    position: int
+    index: int
 
 
 class Binding:
-    """Maps column references to positions in a combined row.
-
-    A query over one table is the easy case. Over a join, the row handed to
-    `evaluate` is every source's columns concatenated in FROM order, and this is
-    what knows that `orders.total` is offset 7.
-    """
-
     def __init__(self) -> None:
         self.columns: list[BoundColumn] = []
         self.labels: list[str] = []
         self._offsets: list[int] = []
 
     def add_source(self, label: str, table: Table) -> int:
-        """Append a table's columns. Returns its position in the FROM clause."""
         if label in self.labels:
             raise PlanError(
                 f"{label!r} is used twice in FROM; give one of them an alias"
@@ -96,10 +50,6 @@ class Binding:
         return self._offsets[position]
 
     def resolve(self, reference: nodes.ColumnRef) -> BoundColumn:
-        """Find the column a reference names, or explain why it cannot.
-
-        An unqualified name that two tables both have is an error, not a guess.
-        """
         if reference.qualifier is not None:
             if reference.qualifier not in self.labels:
                 raise PlanError(
@@ -140,7 +90,6 @@ class Binding:
         return [column for column in self.columns if column.position == position]
 
     def positions_used(self, expression: nodes.Expression | None) -> set[int]:
-        """Which FROM sources an expression reads. Empty means it is constant."""
         used = set()
         for node in nodes.walk(expression):
             if isinstance(node, nodes.ColumnRef):
@@ -148,30 +97,22 @@ class Binding:
         return used
 
     def output_label(self, column: BoundColumn) -> str:
-        """How a `*` expansion should name this column."""
         return column.name if len(self.labels) == 1 else f"{column.label}.{column.name}"
-
-
-# ----------------------------------------------------------------------
-# plans
-# ----------------------------------------------------------------------
 
 
 @dataclass
 class SourcePlan:
-    """One table in the FROM clause, and how its rows will be fetched."""
-
     label: str
     table: Table
     position: int
     join_kind: str = "INNER"
-    condition: nodes.Expression | None = None  # the ON condition
-    method: str = "scan"  # scan | seek | range | probe
+    condition: nodes.Expression | None = None
+    method: str = "scan"
     index: Index | None = None
-    value: object = None  # for seek
-    low: bytes | None = None  # for range
+    value: object = None
+    low: bytes | None = None
     high: bytes | None = None
-    probe: nodes.Expression | None = None  # for probe, evaluated per outer row
+    probe: nodes.Expression | None = None
     reason: str = ""
 
     def describe(self) -> str:
@@ -181,8 +122,6 @@ class SourcePlan:
 
 @dataclass
 class QueryPlan:
-    """A whole SELECT, ready to run."""
-
     binding: Binding
     sources: list[SourcePlan]
     items: list[nodes.SelectItem]
@@ -195,9 +134,6 @@ class QueryPlan:
     offset: int | None = None
     distinct: bool = False
     aggregates: list[nodes.FunctionCall] = field(default_factory=list)
-    # Resolved offsets of the columns named in GROUP BY: the only bare columns
-    # that have a single value per group, and so the only ones a grouped query may
-    # select or sort by outside an aggregate.
     grouped_columns: set[int] = field(default_factory=set)
 
     @property
@@ -209,7 +145,6 @@ class QueryPlan:
         return ", ".join(source.describe() for source in self.sources)
 
     def describe(self) -> list[str]:
-        """The plan as lines, bottom-up: how `EXPLAIN` prints it."""
         lines = [source.describe() for source in self.sources]
         if self.where is not None:
             lines.append(f"filter {self.where}")
@@ -233,15 +168,9 @@ class QueryPlan:
         return lines
 
 
-# ----------------------------------------------------------------------
-# building a plan
-# ----------------------------------------------------------------------
-
-
 def build_plan(
     select: nodes.Select, open_table: Callable[[str], Table]
 ) -> QueryPlan:
-    """Resolve a parsed SELECT against real tables and choose its access paths."""
     binding = Binding()
     references = _flatten_sources(select.source)
     sources: list[SourcePlan] = []
@@ -291,7 +220,6 @@ def build_plan(
 def _flatten_sources(
     source: nodes.TableRef | nodes.Join,
 ) -> list[tuple[nodes.TableRef, str, nodes.Expression | None]]:
-    """Turn the FROM tree into a left-to-right list of `(table, kind, on)`."""
     if isinstance(source, nodes.TableRef):
         return [(source, "INNER", None)]
     return _flatten_sources(source.left) + [
@@ -302,7 +230,6 @@ def _flatten_sources(
 def _expand_stars(
     binding: Binding, items: list[nodes.SelectItem]
 ) -> list[nodes.SelectItem]:
-    """Replace `*` and `t.*` with one item per column."""
     expanded: list[nodes.SelectItem] = []
     for item in items:
         if not isinstance(item.value, nodes.Star):
@@ -328,12 +255,6 @@ def _expand_stars(
 
 
 def _output_labels(binding: Binding, items: list[nodes.SelectItem]) -> list[str]:
-    """Name the output columns, qualifying only the ones that would collide.
-
-    `SELECT name FROM people` should produce a column called `name`, but
-    `SELECT p.name, pets.name` has to distinguish them, so the colliding ones get
-    their table's label put back on.
-    """
     labels = [item.label() for item in items]
     duplicated = {label for label in labels if labels.count(label) > 1}
     if not duplicated:
@@ -348,11 +269,10 @@ def _output_labels(binding: Binding, items: list[nodes.SelectItem]) -> list[str]
 
 
 def _validate(plan: QueryPlan) -> None:
-    """Check the things that are wrong regardless of the data."""
     for expression in [item.value for item in plan.items]:
         for node in nodes.walk(expression):
             if isinstance(node, nodes.ColumnRef):
-                plan.binding.resolve(node)  # raises if it cannot be resolved
+                plan.binding.resolve(node)
     for key in plan.group_by:
         for node in nodes.walk(key):
             if isinstance(node, nodes.ColumnRef):
@@ -362,8 +282,6 @@ def _validate(plan: QueryPlan) -> None:
 
     if not plan.grouped:
         return
-    # With grouping, a bare column in the select list has no single value per
-    # group unless it is one of the grouping keys.
     plan.grouped_columns = {
         plan.binding.resolve(node).index
         for key in plan.group_by
@@ -381,7 +299,6 @@ def _validate(plan: QueryPlan) -> None:
 
 
 def _outside_aggregates(expression) -> Iterator[nodes.Expression]:
-    """Every node of `expression` that is not inside an aggregate call."""
     if expression is None or isinstance(expression, nodes.Star):
         return
     if isinstance(expression, nodes.FunctionCall):
@@ -396,20 +313,9 @@ def _outside_aggregates(expression) -> Iterator[nodes.Expression]:
             yield from _outside_aggregates(child)
 
 
-# ----------------------------------------------------------------------
-# access paths
-# ----------------------------------------------------------------------
-
-
 def _choose_access_path(
     binding: Binding, source: SourcePlan, candidates: list[nodes.Expression]
 ) -> None:
-    """Pick the cheapest way to read `source`, given the conditions available.
-
-    Only conjunctions are considered: in `a AND b` either half may drive the path
-    because both must hold anyway. An `OR` may not, since rows matching its other
-    half would be missed.
-    """
     best_score = 0
     for condition in candidates:
         if not isinstance(condition, nodes.Compare):
@@ -429,7 +335,7 @@ def _choose_access_path(
             try:
                 index.value_key(other.value)
             except Exception:
-                continue  # a type mismatch: let the filter reject the rows
+                continue
             if operator == "=":
                 score = 5 if index.unique else 4
                 if score > best_score:
@@ -453,8 +359,6 @@ def _choose_access_path(
                     )
             continue
 
-        # Not a literal: usable only if it depends solely on tables already joined,
-        # which is what makes an index nested-loop join possible.
         if operator == "=" and dependencies and max(dependencies) < source.position:
             score = 5 if index.unique else 4
             if score > best_score:
@@ -468,11 +372,6 @@ def _choose_access_path(
 def _orient(
     binding: Binding, condition: nodes.Compare, position: int
 ) -> tuple[BoundColumn | None, nodes.Expression, str]:
-    """Rewrite a comparison as `this source's column op other`, flipping if needed.
-
-    `42 = id` and `id = 42` mean the same thing, and the planner should not have to
-    care which way round it was written.
-    """
     flipped = {"<": ">", "<=": ">=", ">": "<", ">=": "<="}
     for left, right, operator in (
         (condition.left, condition.right, condition.operator),
@@ -487,18 +386,12 @@ def _orient(
         if column.position != position:
             continue
         if position in binding.positions_used(right):
-            continue  # both sides touch this table, so an index cannot help
+            continue
         return column, right, operator
     return None, condition.right, condition.operator
 
 
-# ----------------------------------------------------------------------
-# running a plan
-# ----------------------------------------------------------------------
-
-
 def run(plan: QueryPlan) -> Iterator[tuple]:
-    """Produce the output rows of a plan, in order."""
     rows = _join(plan, (), 0)
     rows = (values for values in rows if _keeps(plan.where, plan.binding, values))
     emitted = _group(plan, rows) if plan.grouped else _project_each(plan, rows)
@@ -510,7 +403,6 @@ def run(plan: QueryPlan) -> Iterator[tuple]:
 
 
 def _join(plan: QueryPlan, prefix: tuple, position: int) -> Iterator[tuple]:
-    """Nested-loop join, one source per level of recursion."""
     source = plan.sources[position]
     last = position + 1 == len(plan.sources)
     matched = False
@@ -526,8 +418,6 @@ def _join(plan: QueryPlan, prefix: tuple, position: int) -> Iterator[tuple]:
         else:
             yield from _join(plan, combined, position + 1)
     if not matched and source.join_kind == "LEFT":
-        # The outer row has no match, so it is emitted once with the inner
-        # columns NULL. That is the only thing a LEFT JOIN adds.
         combined = prefix + (None,) * len(source.table.schema)
         if last:
             yield combined
@@ -546,7 +436,7 @@ def _source_rows(
     if source.method == "probe":
         value = value_of(source.probe, plan.binding, prefix)
         if value is None:
-            return iter(())  # NULL matches nothing through an index
+            return iter(())
         try:
             return table.rows_for(source.index.seek(value))
         except Exception as error:
@@ -563,20 +453,8 @@ def _keeps(
     return condition is None or evaluate(condition, binding, values) is True
 
 
-# ----------------------------------------------------------------------
-# projection, grouping, sorting
-# ----------------------------------------------------------------------
-
-
 @dataclass
 class Emitted:
-    """One output row, with the context needed to sort or filter it afterwards.
-
-    `ORDER BY` and `HAVING` can mention things that are not in the output --
-    `SELECT name FROM people ORDER BY age` -- so the source row and the group's
-    aggregate values travel alongside it.
-    """
-
     row: tuple
     values: tuple
     aggregates: dict
@@ -591,11 +469,6 @@ def _project_each(plan: QueryPlan, rows: Iterable[tuple]) -> Iterator[Emitted]:
 
 
 def _group(plan: QueryPlan, rows: Iterable[tuple]) -> Iterator[Emitted]:
-    """Collect rows into groups, then emit one row per group.
-
-    Materialises, because grouping cannot do otherwise: the first group's COUNT is
-    not known until the last row has been seen.
-    """
     groups: dict[tuple, tuple[tuple, list]] = {}
     for values in rows:
         key = tuple(
@@ -611,7 +484,6 @@ def _group(plan: QueryPlan, rows: Iterable[tuple]) -> Iterator[Emitted]:
             accumulator.add(values)
 
     if not groups and not plan.group_by:
-        # No rows and no GROUP BY is still one group: COUNT(*) is 0, not nothing.
         groups[()] = (
             (None,) * plan.binding.width,
             [_Accumulator(call, plan.binding) for call in plan.aggregates],
@@ -632,8 +504,6 @@ def _group(plan: QueryPlan, rows: Iterable[tuple]) -> Iterator[Emitted]:
 
 
 class _Accumulator:
-    """Running state for one aggregate call over one group."""
-
     def __init__(self, call: nodes.FunctionCall, binding: Binding) -> None:
         self.call = call
         self.binding = binding
@@ -648,7 +518,7 @@ class _Accumulator:
             return
         value = value_of(self.call.argument, self.binding, values)
         if value is None:
-            return  # every aggregate but COUNT(*) ignores NULLs
+            return
         if self.call.distinct:
             if value in self.seen:
                 return
@@ -671,7 +541,7 @@ class _Accumulator:
         if name == "COUNT":
             return self.count
         if self.count == 0:
-            return None  # SUM, AVG, MIN, MAX of nothing is NULL, not zero
+            return None
         if name == "SUM":
             return self.total
         if name == "AVG":
@@ -689,11 +559,6 @@ def _distinct(emitted: Iterable[Emitted]) -> Iterator[Emitted]:
 
 
 def _sort(plan: QueryPlan, emitted: Iterable[Emitted]) -> list[Emitted]:
-    """Sort by each key in turn, last key first.
-
-    Relying on Python's stable sort is the standard trick for a multi-key sort with
-    mixed directions, and it keeps each key's handling independent.
-    """
     materialised = list(emitted)
     for key in reversed(plan.order_by):
         extract = _sort_extractor(plan, key)
@@ -702,13 +567,6 @@ def _sort(plan: QueryPlan, emitted: Iterable[Emitted]) -> list[Emitted]:
 
 
 def _sort_extractor(plan: QueryPlan, key: nodes.OrderBy) -> Callable[[Emitted], tuple]:
-    """How to get one sort key out of an output row.
-
-    Four ways, tried in order, because SQL lets `ORDER BY` name a thing in four
-    different ways: by output position, by an output column's name or alias, by a
-    column that happens to also be selected, or by an expression evaluated over the
-    row itself.
-    """
     if isinstance(key.value, int):
         position = key.value
         if not 1 <= position <= len(plan.output):
@@ -720,7 +578,6 @@ def _sort_extractor(plan: QueryPlan, key: nodes.OrderBy) -> Callable[[Emitted], 
 
     expression = key.value
 
-    # An alias or an aggregate's printed form, matched against the output names.
     for candidate in (
         expression.name if isinstance(expression, nodes.ColumnRef) else None,
         str(expression),
@@ -729,8 +586,6 @@ def _sort_extractor(plan: QueryPlan, key: nodes.OrderBy) -> Callable[[Emitted], 
             position = plan.output.index(candidate)
             return lambda item, i=position: _sort_key(item.row[i])
 
-    # A column that is also being selected, however either one spelled it:
-    # `SELECT p.name ... ORDER BY name` and the reverse both land here.
     if isinstance(expression, nodes.ColumnRef):
         try:
             target = plan.binding.resolve(expression).index
@@ -757,11 +612,6 @@ def _sort_extractor(plan: QueryPlan, key: nodes.OrderBy) -> Callable[[Emitted], 
 
 
 def _limit(plan: QueryPlan, emitted: Iterable[Emitted]) -> Iterator[tuple]:
-    """Skip `offset` rows and stop after `limit`.
-
-    Stopping is the point: this generator is what lets a LIMIT keep the scan
-    underneath it from reading the rest of the table.
-    """
     remaining = plan.limit
     skip = plan.offset or 0
     for item in emitted:
@@ -775,27 +625,17 @@ def _limit(plan: QueryPlan, emitted: Iterable[Emitted]) -> Iterator[tuple]:
         yield item.row
 
 
-# ----------------------------------------------------------------------
-# expression evaluation
-# ----------------------------------------------------------------------
-
-
 def evaluate(
     expression: nodes.Expression,
     binding: Binding,
     values: tuple,
     aggregates: dict | None = None,
 ) -> bool | None:
-    """Evaluate a condition against one row, in three-valued logic.
-
-    Returns True, False, or None for unknown. `WHERE` and `HAVING` keep only True,
-    which is why a row whose column is NULL is dropped by both `= 5` and `!= 5`.
-    """
     if isinstance(expression, nodes.And):
         left = evaluate(expression.left, binding, values, aggregates)
         right = evaluate(expression.right, binding, values, aggregates)
         if left is False or right is False:
-            return False  # false AND unknown is false, not unknown
+            return False
         if left is UNKNOWN or right is UNKNOWN:
             return UNKNOWN
         return True
@@ -814,7 +654,6 @@ def evaluate(
         return UNKNOWN if inner is UNKNOWN else not inner
 
     if isinstance(expression, nodes.IsNull):
-        # The one construct that gives a definite answer about NULL.
         is_null = value_of(expression.operand, binding, values, aggregates) is None
         return is_null != expression.negated
 
@@ -835,7 +674,6 @@ def value_of(
     values: tuple,
     aggregates: dict | None = None,
 ) -> object:
-    """The value of a scalar expression for one row."""
     if isinstance(expression, nodes.Literal):
         return expression.value
     if isinstance(expression, nodes.ColumnRef):
@@ -850,7 +688,6 @@ def value_of(
     if isinstance(
         expression, (nodes.Compare, nodes.And, nodes.Or, nodes.Not, nodes.IsNull)
     ):
-        # A condition used as a value: SQL has no booleans, so report it as 1/0.
         truth = evaluate(expression, binding, values, aggregates)
         return None if truth is UNKNOWN else int(truth)
     raise PlanError(f"{expression} cannot be used as a value")
@@ -869,21 +706,15 @@ def _compare(
     if operator == "!=":
         return left != right
     if operator == "<":
-        return left < right  # type: ignore[operator]
+        return left < right
     if operator == "<=":
-        return left <= right  # type: ignore[operator]
+        return left <= right
     if operator == ">":
-        return left > right  # type: ignore[operator]
-    return left >= right  # type: ignore[operator]
-
-
-# ----------------------------------------------------------------------
-# helpers
-# ----------------------------------------------------------------------
+        return left > right
+    return left >= right
 
 
 def _conjuncts(expression: nodes.Expression | None) -> Iterator[nodes.Expression]:
-    """Flatten a chain of ANDs. Everything else yields itself."""
     if expression is None:
         return
     if isinstance(expression, nodes.And):
@@ -894,11 +725,6 @@ def _conjuncts(expression: nodes.Expression | None) -> Iterator[nodes.Expression
 
 
 def _sort_key(value: object) -> tuple:
-    """A sort key that puts NULL first and never compares a str with an int.
-
-    Python refuses to order `None` and refuses `1 < 'a'`, so each value becomes
-    `(group, value)` where the group makes the types sort in blocks.
-    """
     if value is None:
         return (0, 0)
     if isinstance(value, str):
@@ -913,12 +739,6 @@ def _type_name(value: object) -> str:
 
 
 def coerce_value(column_type: ColumnType, value: object, where: str) -> object:
-    """Check a literal against the column it is going into.
-
-    SQL engines vary wildly in how much they coerce here. This one does not coerce
-    at all: storing `'42'` in an INT column is a mistake worth reporting, not
-    something to quietly convert.
-    """
     if value is None:
         return None
     if column_type is ColumnType.INT:
@@ -931,7 +751,6 @@ def coerce_value(column_type: ColumnType, value: object, where: str) -> object:
 
 
 def single_source_binding(label: str, table: Table) -> Binding:
-    """A binding over one table, for UPDATE and DELETE."""
     binding = Binding()
     binding.add_source(label, table)
     return binding
@@ -940,7 +759,6 @@ def single_source_binding(label: str, table: Table) -> Binding:
 def single_source_plan(
     binding: Binding, table: Table, where: nodes.Expression | None
 ) -> SourcePlan:
-    """Choose an access path for a one-table statement."""
     source = SourcePlan(table.name, table, 0)
     _choose_access_path(binding, source, list(_conjuncts(where)))
     return source
@@ -949,7 +767,6 @@ def single_source_plan(
 def scan_single(
     binding: Binding, source: SourcePlan, where: nodes.Expression | None
 ) -> Iterator[tuple[RowId, tuple]]:
-    """Row ids and values for a one-table statement, filtered."""
     table = source.table
     if source.method == "seek":
         rows = table.rows_for(source.index.seek(source.value))

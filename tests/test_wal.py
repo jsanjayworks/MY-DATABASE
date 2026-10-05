@@ -1,19 +1,3 @@
-"""Tests for layer 5, the write-ahead log.
-
-Durability is the one property you cannot test by calling functions and checking
-return values: it is about what survives a process that stops existing. So the
-tests here come in three kinds.
-
-* **Order** -- assertions about what has and has not reached the data file at each
-  point in a commit, because the write-ahead rule *is* an ordering rule.
-* **Recovery** -- a hand-built log file replayed into a database, including the
-  torn and half-written shapes a real crash leaves behind.
-* **Crashing** -- an actual child process, actually killed, at a moment it does
-  not choose. That one is the milestone.
-
-Run with:  python -m unittest discover -s tests -v
-"""
-
 from __future__ import annotations
 
 import os
@@ -28,11 +12,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-from pydb.btree import BTree  # noqa: E402
-from pydb.buffer_pool import AllFramesPinnedError, BufferPool  # noqa: E402
-from pydb.pager import META_SLOT_ROOT, PAGE_SIZE, Pager  # noqa: E402
-from pydb.record import ColumnType, encode_key  # noqa: E402
-from pydb.wal import (  # noqa: E402
+from pydb.btree import BTree
+from pydb.buffer_pool import AllFramesPinnedError, BufferPool
+from pydb.pager import META_SLOT_ROOT, PAGE_SIZE, Pager
+from pydb.record import ColumnType, encode_key
+from pydb.wal import (
     FLAG_COMMIT,
     FRAME_HEADER_FORMAT,
     FRAME_HEADER_SIZE,
@@ -53,12 +37,6 @@ def int_key(value: int) -> bytes:
 
 
 def handmade_log(path: str, frames: list[tuple[int, int, bytes, int]]) -> None:
-    """Write a log file containing exactly `frames` as `(lsn, page_id, image, flags)`.
-
-    Building the file by hand is the only way to test recovery against the shapes
-    a crash leaves: a frame cut in half, a bad checksum, a transaction with no
-    commit flag.
-    """
     first_lsn = frames[0][0] if frames else 1
     with open(path, "wb") as f:
         f.write(
@@ -97,13 +75,11 @@ class WalTestCase(unittest.TestCase):
         return pool, wal
 
     def raw_page(self, page_id: int) -> bytes:
-        """A page straight out of the data file, bypassing pool, log and pager."""
         with open(self.path, "rb") as f:
             f.seek(page_id * PAGE_SIZE)
             return f.read(PAGE_SIZE)
 
     def log_frames(self) -> list[tuple[int, int, int, bytes]]:
-        """Parse the log file: `(lsn, page_id, flags, image)` per frame."""
         with open(self.wal_path, "rb") as f:
             f.read(WAL_HEADER_SIZE)
             out = []
@@ -151,8 +127,6 @@ class TestCommit(WalTestCase):
         self.assertEqual(os.path.getsize(self.wal_path), WAL_HEADER_SIZE)
 
     def test_a_page_modified_twice_in_one_transaction_is_logged_once(self):
-        """The log records pages, not writes. This is what keeps it from being
-        hundreds of megabytes for a B+Tree whose root is touched constantly."""
         pool, wal = self.open_db()
         page_id, page = pool.new_page()
         for i in range(20):
@@ -175,12 +149,7 @@ class TestCommit(WalTestCase):
 
 
 class TestWriteAheadOrdering(WalTestCase):
-    """The rule itself: nothing reaches the data file before its log record."""
-
     def test_an_uncommitted_page_never_reaches_the_data_file(self):
-        """There is only ever one transaction here, so filling the pool with
-        uncommitted pages is the strongest eviction pressure available: none of
-        them may be written out, and none of them are."""
         pool, wal = self.open_db()
         pages = []
         for _ in range(self.CAPACITY - 1):
@@ -206,9 +175,6 @@ class TestWriteAheadOrdering(WalTestCase):
         self.assertEqual(self.raw_page(page_id)[:6], b"logged")
 
     def test_a_transaction_bigger_than_the_pool_is_refused_not_leaked(self):
-        """No-steal has a price, and this is it: a transaction cannot outgrow the
-        buffer pool, because no uncommitted page may be written out to make room.
-        Refusing loudly beats silently putting uncommitted data in the file."""
         pool, wal = self.open_db(capacity=4)
         with self.assertRaises(AllFramesPinnedError):
             for _ in range(20):
@@ -223,7 +189,7 @@ class TestWriteAheadOrdering(WalTestCase):
             page_id, page = pool.new_page()
             page[:1] = b"x"
             pool.unpin_page(page_id, dirty=True)
-            wal.commit()  # each page becomes evictable as soon as it is durable
+            wal.commit()
         self.assertEqual(pool.pager.page_count, 21)
 
 
@@ -267,12 +233,6 @@ class TestRollback(WalTestCase):
             self.assertEqual(bytes(page[:4]), b"live", "the page was never clobbered")
 
     def test_a_freed_page_can_be_allocated_again_after_the_commit(self):
-        """Committing a free has to drop the page from the pool as well.
-
-        It did not, once: the page went on the pager's free list while its old
-        frame stayed cached, so the next allocation handed out a page id the pool
-        still held. Nothing noticed until something freed pages in bulk.
-        """
         pool, wal = self.open_db()
         first, page = pool.new_page()
         page[:4] = b"gone"
@@ -300,7 +260,7 @@ class TestRollback(WalTestCase):
             pages.append(page_id)
             wal.commit()
 
-        for start in range(0, len(pages), 4):  # small batches, as Database does
+        for start in range(0, len(pages), 4):
             for page_id in pages[start : start + 4]:
                 pool.free_page(page_id)
             wal.commit()
@@ -308,8 +268,6 @@ class TestRollback(WalTestCase):
         self.assertEqual(pool.resident_pages(), [])
 
     def test_rollback_undoes_a_meta_slot_write(self):
-        """The B+Tree root lives in a meta slot, so "the root moved" has to be a
-        change a rollback can take back like any other."""
         pool, wal = self.open_db()
         pool.pager.write_meta_slot(META_SLOT_ROOT, 7)
         wal.commit()
@@ -399,7 +357,6 @@ class TestCheckpoint(WalTestCase):
 
 class TestRecovery(WalTestCase):
     def existing_database(self) -> int:
-        """A clean single-page database, closed properly. Returns the page id."""
         pool = BufferPool.open(self.path, capacity=8)
         wal = Wal(pool)
         page_id, page = pool.new_page()
@@ -421,14 +378,12 @@ class TestRecovery(WalTestCase):
             self.assertEqual(bytes(page[:9]), b"recovered")
 
     def test_frames_after_the_last_commit_are_discarded(self):
-        """A transaction that never committed leaves no trace. This is atomicity:
-        the log has the bytes, and recovery refuses to use them."""
         page_id = self.existing_database()
         handmade_log(
             self.wal_path,
             [
                 (10, page_id, b"committed", FLAG_COMMIT),
-                (11, page_id, b"half-done", 0),  # no commit flag ever arrived
+                (11, page_id, b"half-done", 0),
             ],
         )
         pool, wal = self.open_db()
@@ -440,7 +395,7 @@ class TestRecovery(WalTestCase):
         page_id = self.existing_database()
         handmade_log(self.wal_path, [(10, page_id, b"committed", FLAG_COMMIT)])
         with open(self.wal_path, "ab") as f:
-            f.write(b"\x00" * (FRAME_SIZE // 3))  # the crash landed mid-append
+            f.write(b"\x00" * (FRAME_SIZE // 3))
         pool, wal = self.open_db()
         self.assertEqual(wal.recovered_frames, 1)
         with pool.pinned(page_id) as page:
@@ -455,7 +410,7 @@ class TestRecovery(WalTestCase):
                 (11, page_id, b"corrupt", FLAG_COMMIT),
             ],
         )
-        with open(self.wal_path, "r+b") as f:  # flip a byte in the second frame
+        with open(self.wal_path, "r+b") as f:
             offset = WAL_HEADER_SIZE + FRAME_SIZE + FRAME_HEADER_SIZE
             f.seek(offset)
             f.write(b"X")
@@ -485,13 +440,11 @@ class TestRecovery(WalTestCase):
         self.assertEqual(os.path.getsize(self.wal_path), WAL_HEADER_SIZE)
 
     def test_replaying_the_meta_page_restores_the_page_count(self):
-        """The nastiest thing a crash can break: page 0. If the meta page is lost
-        or half-written the whole file is unreadable, so it is logged too."""
         self.existing_database()
         with Pager(self.path) as pager:
             real_count = pager.page_count
             image = bytearray(pager.meta_image())
-        struct.pack_into(">I", image, 12, real_count + 5)  # a page count from later
+        struct.pack_into(">I", image, 12, real_count + 5)
         handmade_log(self.wal_path, [(10, 0, bytes(image), FLAG_COMMIT)])
         pool, _wal = self.open_db()
         self.assertEqual(pool.pager.page_count, real_count + 5)
@@ -500,14 +453,13 @@ class TestRecovery(WalTestCase):
         self.existing_database()
         with open(self.wal_path, "r+b") as f:
             f.seek(8)
-            f.write(struct.pack(">H", 99))  # version from the future
+            f.write(struct.pack(">H", 99))
         pool = BufferPool.open(self.path, capacity=8)
         self.addCleanup(pool.close)
         with self.assertRaises(CorruptWalError):
             Wal(pool)
 
     def test_a_log_cannot_be_attached_to_a_pool_that_already_read_pages(self):
-        """Recovery writes pages behind the pool's back, so it must go first."""
         page_id = self.existing_database()
         pool = BufferPool.open(self.path, capacity=8)
         self.addCleanup(pool.close)
@@ -518,13 +470,11 @@ class TestRecovery(WalTestCase):
 
 
 class TestWithABTree(WalTestCase):
-    """The log carrying a real workload, where a torn commit means a broken tree."""
-
     def open_tree(self, capacity: int = 32) -> tuple[BufferPool, Wal, BTree]:
         pool, wal = self.open_db(capacity)
         pager = pool.pager
         root = pager.read_meta_slot(META_SLOT_ROOT)
-        save = lambda page_id: pager.write_meta_slot(META_SLOT_ROOT, page_id)  # noqa: E731
+        save = lambda page_id: pager.write_meta_slot(META_SLOT_ROOT, page_id)
         if root == 0:
             tree = BTree.create(pool, on_root_change=save)
             save(tree.root_page_id)
@@ -604,7 +554,6 @@ while True:
     for i in range(batch * BATCH, batch * BATCH + BATCH):
         tree.put(encode_key(ColumnType.INT, i), b"value-%d" % i)
     wal.commit()
-    # Only now is this batch durable, so only now may it be acknowledged.
     sys.stdout.write("%d\n" % batch)
     sys.stdout.flush()
     batch += 1
@@ -612,16 +561,7 @@ while True:
 
 
 class TestMilestone(WalTestCase):
-    """The layer 5 milestone from ROADMAP.md.
-
-    A child process writes in a loop and is killed at a moment it does not choose.
-    On reopen the database must be consistent and every acknowledged write must be
-    present -- and, just as importantly, a batch that was *not* acknowledged must
-    be either entirely there or entirely absent. A half-applied transaction is the
-    failure this whole layer exists to prevent.
-    """
-
-    BATCH = 12  # keys per transaction: several pages, so a torn commit is possible
+    BATCH = 12
     ROUNDS = 4
 
     def test_crash_torture(self):
@@ -652,7 +592,7 @@ class TestMilestone(WalTestCase):
                         acknowledged = int(line)
                         seen += 1
                 finally:
-                    child.kill()  # no cleanup, no close, no checkpoint
+                    child.kill()
                     child.wait()
 
             with self.subTest(round=round_number, acknowledged=acknowledged):
@@ -667,10 +607,8 @@ class TestMilestone(WalTestCase):
                 self.assertNotEqual(root, 0, "the root page id must be durable")
                 tree = BTree(pool, root)
 
-                # 1. The database is internally consistent, whatever the crash hit.
                 tree.verify_invariants()
 
-                # 2. Everything acknowledged is present.
                 for batch in range(acknowledged + 1):
                     for key in range(batch * self.BATCH, (batch + 1) * self.BATCH):
                         if tree.get(int_key(key)) != b"value-%d" % key:
@@ -679,7 +617,6 @@ class TestMilestone(WalTestCase):
                                 f"(last acknowledged batch was {acknowledged})"
                             )
 
-                # 3. Anything past that is all-or-nothing, never half applied.
                 for batch in range(acknowledged + 1, acknowledged + 40):
                     keys = range(batch * self.BATCH, (batch + 1) * self.BATCH)
                     present = [tree.get(int_key(key)) is not None for key in keys]

@@ -1,42 +1,3 @@
-"""Layer 7d: the parser.
-
-Recursive descent, one method per grammar rule, no tables and no generated code.
-For a language this size that is the most readable thing there is: the grammar
-below and the methods underneath it are the same shape, so a change to one is
-obvious in the other.
-
-    statement  := create_table | create_index | drop_table | drop_index
-                | insert | select | delete | update | vacuum | explain
-                | BEGIN | COMMIT | ROLLBACK
-    create_table := CREATE TABLE [IF NOT EXISTS] name '(' coldef {',' coldef} ')'
-    coldef     := name type [NOT NULL] [PRIMARY KEY]
-    create_index := CREATE [UNIQUE] INDEX [IF NOT EXISTS] name ON table '(' col ')'
-    insert     := INSERT INTO name ['(' name {',' name} ')'] VALUES tuple {',' tuple}
-    select     := SELECT [DISTINCT] item {',' item} FROM source
-                  [WHERE expr] [GROUP BY expr {',' expr}] [HAVING expr]
-                  [ORDER BY sort {',' sort}] [LIMIT n [OFFSET n]]
-    item       := '*' | qualifier '.' '*' | expr [[AS] alias]
-    source     := table_ref {[INNER | LEFT [OUTER] | CROSS] JOIN table_ref [ON expr]}
-    table_ref  := name [[AS] alias]
-    sort       := (expr | NUMBER) [ASC | DESC]
-    delete     := DELETE FROM name [WHERE expr]
-    update     := UPDATE name SET name '=' expr {',' ...} [WHERE expr]
-
-    expr       := or_expr
-    or_expr    := and_expr {OR and_expr}
-    and_expr   := not_expr {AND not_expr}
-    not_expr   := NOT not_expr | predicate
-    predicate  := operand [ (= | != | <> | < | <= | > | >=) operand
-                          | IS [NOT] NULL ]
-    operand    := NUMBER | STRING | NULL | ['-' | '+'] NUMBER | column
-                | aggregate '(' ('*' | [DISTINCT] expr) ')' | '(' expr ')'
-    column     := name ['.' name]
-
-Precedence falls out of the nesting: `OR` binds loosest, then `AND`, then `NOT`,
-then comparison. So `a = 1 AND b = 2 OR c = 3` parses as `(a=1 AND b=2) OR c=3`,
-which is what SQL says it should.
-"""
-
 from __future__ import annotations
 
 from pydb.record import Column, ColumnType
@@ -47,8 +8,6 @@ from pydb.sql.tokenizer import Token, TokenType, tokenize
 COMPARISONS = frozenset(("=", "!=", "<>", "<", "<=", ">", ">="))
 TYPE_KEYWORDS = {"INT": "INT", "INTEGER": "INT", "TEXT": "TEXT"}
 
-# Keywords that cannot be an alias, because seeing one means the FROM clause or
-# the select list has ended.
 NOT_AN_ALIAS = frozenset(
     """
     FROM WHERE GROUP HAVING ORDER LIMIT OFFSET JOIN INNER LEFT OUTER CROSS ON
@@ -58,7 +17,6 @@ NOT_AN_ALIAS = frozenset(
 
 
 def parse(sql: str) -> nodes.Statement:
-    """Parse exactly one statement, with an optional trailing semicolon."""
     parser = Parser(sql)
     statement = parser.statement()
     parser.expect_end()
@@ -66,7 +24,6 @@ def parse(sql: str) -> nodes.Statement:
 
 
 def parse_script(sql: str) -> list[nodes.Statement]:
-    """Parse a run of semicolon-separated statements."""
     parser = Parser(sql)
     statements = []
     while not parser.at_end:
@@ -77,16 +34,10 @@ def parse_script(sql: str) -> list[nodes.Statement]:
 
 
 class Parser:
-    """A cursor over the token list, plus one method per grammar rule."""
-
     def __init__(self, sql: str) -> None:
         self.sql = sql
         self.tokens = tokenize(sql)
         self.index = 0
-
-    # ------------------------------------------------------------------
-    # cursor
-    # ------------------------------------------------------------------
 
     @property
     def current(self) -> Token:
@@ -141,7 +92,6 @@ class Parser:
         self.index += 1
 
     def expect_name(self) -> str:
-        """An identifier. A keyword here is a mistake worth naming precisely."""
         token = self.current
         if token.type is TokenType.IDENTIFIER:
             self.index += 1
@@ -158,7 +108,7 @@ class Parser:
         if token.type is not TokenType.NUMBER:
             self.fail("a number")
         self.index += 1
-        return int(token.value)  # type: ignore[arg-type]
+        return int(token.value)
 
     def expect_end(self) -> None:
         self.take_punctuation(";")
@@ -171,10 +121,6 @@ class Parser:
             f"expected {expected} but found {token} at position {token.position}",
             token.position,
         )
-
-    # ------------------------------------------------------------------
-    # statements
-    # ------------------------------------------------------------------
 
     def statement(self) -> nodes.Statement:
         token = self.current
@@ -241,7 +187,7 @@ class Parser:
                 if self.take_keyword("PRIMARY"):
                     self.expect_keyword("KEY")
                     is_key = True
-                    nullable = False  # a key cannot be NULL, so say so up front
+                    nullable = False
                     continue
                 break
             columns.append(
@@ -343,7 +289,6 @@ class Parser:
     def select_item(self) -> nodes.SelectItem:
         if self.take_punctuation("*"):
             return nodes.SelectItem(nodes.Star())
-        # `people.*` -- an identifier, a dot and a star.
         if (
             self.current.type is TokenType.IDENTIFIER
             and self.peek().value == "."
@@ -357,7 +302,6 @@ class Parser:
         return nodes.SelectItem(value, self.alias())
 
     def alias(self) -> str | None:
-        """An optional `AS name`, or a bare name where one cannot be anything else."""
         if self.take_keyword("AS"):
             return self.expect_name()
         if self.current.type is TokenType.IDENTIFIER:
@@ -369,7 +313,7 @@ class Parser:
         while True:
             kind = None
             if self.take_punctuation(","):
-                kind = "CROSS"  # the comma form of a cross join
+                kind = "CROSS"
             elif self.take_keyword("CROSS"):
                 self.expect_keyword("JOIN")
                 kind = "CROSS"
@@ -400,8 +344,6 @@ class Parser:
         return nodes.TableRef(name, alias)
 
     def sort_key(self) -> nodes.OrderBy:
-        # A bare number is a select-list position: `ORDER BY 2` sorts by the
-        # second output column, which is standard SQL and handy with aggregates.
         if self.current.type is TokenType.NUMBER:
             value: nodes.Expression | int = self.expect_number()
         else:
@@ -456,10 +398,6 @@ class Parser:
         self.expect_keyword("ROLLBACK")
         self.take_keyword("TRANSACTION")
         return nodes.Rollback()
-
-    # ------------------------------------------------------------------
-    # expressions
-    # ------------------------------------------------------------------
 
     def expression(self) -> nodes.Expression:
         return self.or_expression()

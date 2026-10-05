@@ -1,18 +1,3 @@
-"""Tests for the parts of SQL that need more than one table or more than one row:
-joins, aggregates, grouping, secondary indexes, and page reclamation.
-
-Two kinds of assertion appear here, and the second is the one that matters:
-
-* **what came back** -- the rows, including the awkward cases (a LEFT JOIN with no
-  match, `COUNT(*)` of nothing, `AVG` over NULLs);
-* **how it was fetched** -- the access path, and for the join tests the number of
-  pages visited. A join that returns the right rows by scanning the inner table
-  once per outer row is not a working join, it is a working accident, and the only
-  way to tell the difference is to measure.
-
-Run with:  python -m unittest discover -s tests -v
-"""
-
 from __future__ import annotations
 
 import os
@@ -22,16 +7,16 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from pydb.btree import DuplicateKeyError  # noqa: E402
-from pydb.catalog import (  # noqa: E402
+from pydb.btree import DuplicateKeyError
+from pydb.catalog import (
     IndexExistsError,
     UnknownIndexError,
     escape_key,
     prefix_end,
 )
-from pydb.database import Database  # noqa: E402
-from pydb.sql.engine import Engine  # noqa: E402
-from pydb.sql.errors import PlanError, ValueTypeError  # noqa: E402
+from pydb.database import Database
+from pydb.sql.engine import Engine
+from pydb.sql.errors import PlanError, ValueTypeError
 
 
 class QueryTestCase(unittest.TestCase):
@@ -64,7 +49,6 @@ class QueryTestCase(unittest.TestCase):
             self.sql.catalog.open(name).verify()
 
     def bookshop(self) -> None:
-        """Authors and their books: two tables, a foreign-key-ish column, some NULLs."""
         self.sql.execute(
             "CREATE TABLE authors (id INT PRIMARY KEY, name TEXT NOT NULL, born INT)"
         )
@@ -110,7 +94,7 @@ class TestJoins(QueryTestCase):
         names = [r[0] for r in self.rows(
             "SELECT a.name FROM authors a JOIN books b ON b.author = a.id"
         )]
-        self.assertNotIn("cy", names)  # no books
+        self.assertNotIn("cy", names)
         self.assertNotIn("dee", names)
 
     def test_a_left_join_keeps_them_with_nulls(self):
@@ -120,10 +104,9 @@ class TestJoins(QueryTestCase):
         )
         self.assertIn(("cy", None), rows)
         self.assertIn(("dee", None), rows)
-        self.assertEqual(len(rows), 6)  # 4 matched + 2 unmatched authors
+        self.assertEqual(len(rows), 6)
 
     def test_a_null_join_column_matches_nothing(self):
-        """The anonymous book has a NULL author, and NULL equals nothing."""
         titles = [r[0] for r in self.rows(
             "SELECT b.title FROM books b JOIN authors a ON a.id = b.author"
         )]
@@ -201,9 +184,6 @@ class TestJoins(QueryTestCase):
 
 
 class TestJoinPlans(QueryTestCase):
-    """A join has to use an index on the inner table when it can, or it is
-    quadratic. These tests assert the plan, then measure it."""
-
     def build(self, rows: int = 400) -> None:
         self.sql.execute("CREATE TABLE parent (id INT PRIMARY KEY, label TEXT)")
         self.sql.execute("CREATE TABLE child (id INT PRIMARY KEY, parent INT)")
@@ -239,13 +219,6 @@ class TestJoinPlans(QueryTestCase):
         self.assertIn("scan c", plan, "child.parent is not indexed")
 
     def test_the_probe_visits_far_fewer_pages_than_the_scan(self):
-        """A small outer table joined to a large inner one: the case the index
-        exists for, and the only fair way to measure it.
-
-        With both tables small the scan can win, because re-reading four cached
-        pages beats descending a tree -- which is exactly why a real optimiser
-        needs statistics, and why this one is honest about not having them.
-        """
         self.sql.execute("CREATE TABLE small (id INT PRIMARY KEY, ref INT)")
         self.sql.execute(
             "CREATE TABLE large (id INT PRIMARY KEY, other INT, filler TEXT)"
@@ -261,12 +234,9 @@ class TestJoinPlans(QueryTestCase):
                     large.insert((i, i, f"filler-{i:030d}"))
         self.db.checkpoint()
 
-        # `l.id` is the primary key, so this probes the index once per outer row.
         probing = self.pages_visited(
             "SELECT COUNT(*) FROM small s JOIN large l ON l.id = s.ref"
         )
-        # `l.other` holds the same values but is not indexed, so this scans the
-        # whole of `large` once per outer row.
         scanning = self.pages_visited(
             "SELECT COUNT(*) FROM small s JOIN large l ON l.other = s.ref"
         )
@@ -282,7 +252,6 @@ class TestJoinPlans(QueryTestCase):
         )
 
     def test_indexing_the_join_column_turns_the_scan_into_a_probe(self):
-        """The whole point of CREATE INDEX, seen from the planner's side."""
         self.build(200)
         before = self.plan("SELECT * FROM parent p JOIN child c ON c.parent = p.id")
         self.assertIn("scan c", before)
@@ -326,7 +295,6 @@ class TestAggregates(QueryTestCase):
         self.assertAlmostEqual(average, (1843 + 1842 + 1990 + 1995 + 1900) / 5)
 
     def test_aggregates_of_no_rows(self):
-        """COUNT(*) of nothing is 0; everything else is NULL, not 0."""
         self.assertEqual(
             self.rows(
                 "SELECT COUNT(*), SUM(born), AVG(born), MIN(born), MAX(born) "
@@ -398,7 +366,7 @@ class TestGrouping(QueryTestCase):
             "SELECT author, year, COUNT(*) FROM books GROUP BY author, year "
             "ORDER BY author, year"
         )
-        self.assertEqual(len(rows), 5)  # every book is its own group
+        self.assertEqual(len(rows), 5)
 
     def test_having_filters_groups_not_rows(self):
         self.assertEqual(
@@ -551,8 +519,6 @@ class TestSecondaryIndexes(QueryTestCase):
         self.assertEqual(self.rows("SELECT name FROM people WHERE age = 50"), [])
 
     def test_a_text_index_and_the_prefix_problem(self):
-        """`ab` is a prefix of `abc`, so a naive range would return both. The key
-        escaping exists to stop exactly that."""
         self.sql.execute("INSERT INTO people VALUES (6, 'ab', 1), (7, 'abc', 2)")
         self.sql.execute("CREATE INDEX by_name ON people (name)")
         self.assertEqual(
@@ -564,14 +530,13 @@ class TestSecondaryIndexes(QueryTestCase):
 
     def test_a_non_unique_index_allows_repeats_and_a_unique_one_does_not(self):
         self.sql.execute("CREATE INDEX by_age ON people (age)")
-        self.sql.execute("INSERT INTO people VALUES (8, 'eve', 36)")  # fine
+        self.sql.execute("INSERT INTO people VALUES (8, 'eve', 36)")
         self.sql.execute("CREATE UNIQUE INDEX by_name ON people (name)")
         with self.assertRaises(DuplicateKeyError):
             self.sql.execute("INSERT INTO people VALUES (9, 'ada', 1)")
 
     def test_a_unique_index_ignores_nulls(self):
-        """Several NULLs do not collide, because NULL is not a value."""
-        self.sql.execute("DELETE FROM people WHERE name = 'dee'")  # frees up age 36
+        self.sql.execute("DELETE FROM people WHERE name = 'dee'")
         self.sql.execute("CREATE UNIQUE INDEX by_age ON people (age)")
         self.sql.execute("INSERT INTO people VALUES (10, 'eve', NULL)")
         self.assertEqual(
@@ -583,7 +548,6 @@ class TestSecondaryIndexes(QueryTestCase):
     def test_a_unique_index_cannot_be_created_over_duplicate_data(self):
         with self.assertRaises(DuplicateKeyError):
             self.sql.execute("CREATE UNIQUE INDEX by_age ON people (age)")
-        # The failed statement rolled back, so the index is not half-built.
         self.assertNotIn("by_age", self.sql.catalog.index_names())
 
     def test_a_range_condition_uses_the_index(self):
@@ -654,8 +618,6 @@ class TestSecondaryIndexes(QueryTestCase):
 
 
 class TestKeyEscaping(unittest.TestCase):
-    """The escaping that makes a non-unique index safe for variable-length keys."""
-
     def test_escaping_preserves_order(self):
         values = [b"", b"a", b"a\x00", b"a\x00b", b"ab", b"b", b"\x00", b"\xff"]
         for left in values:
@@ -696,7 +658,6 @@ class TestVacuumAndSpace(QueryTestCase):
         self.assertGreater(freed, 10, "a dropped table's pages should come back")
         self.assertEqual(self.db.pager.page_count, pages_before, "file did not grow")
 
-        # And the freed pages get reused rather than the file growing again.
         self.sql.execute("CREATE TABLE reused (id INT PRIMARY KEY, filler TEXT)")
         for batch in range(5):
             with self.db.transaction():

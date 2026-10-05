@@ -1,12 +1,3 @@
-"""Tests for layer 4a, the B+Tree node layout.
-
-Node-level tests on a bare buffer, so a failure here is never a tree bug. The
-thing worth hammering is the pointer array: it is kept in key order, so every
-insert and remove shifts it, and an off-by-one there corrupts a page silently.
-
-Run with:  python -m unittest discover -s tests -v
-"""
-
 from __future__ import annotations
 
 import os
@@ -15,7 +6,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from pydb.btree_node import (  # noqa: E402
+from pydb.btree_node import (
     MAX_CELL_SIZE,
     MIN_USED,
     PAGE_TYPE_INTERNAL,
@@ -31,7 +22,7 @@ from pydb.btree_node import (  # noqa: E402
     leaf_cell,
     max_value_size,
 )
-from pydb.pager import PAGE_SIZE  # noqa: E402
+from pydb.pager import PAGE_SIZE
 
 
 class NodeTestCase(unittest.TestCase):
@@ -115,11 +106,9 @@ class TestSearch(NodeTestCase):
                 self.assertEqual(self.leaf.search(key), (index, False))
 
     def test_a_key_equal_to_a_separator_descends_right(self):
-        """The separator is the smallest key of the subtree it points at, so an
-        exact match must go right, not left."""
         for key, child in ((b"b", 2), (b"d", 3), (b"f", 4), (b"h", 5)):
             self.internal.append_cell(internal_cell(key, child))
-        self.assertEqual(self.internal.find_child(b"a"), 0)  # leftmost
+        self.assertEqual(self.internal.find_child(b"a"), 0)
         self.assertEqual(self.internal.find_child(b"b"), 1)
         self.assertEqual(self.internal.find_child(b"c"), 1)
         self.assertEqual(self.internal.find_child(b"h"), 4)
@@ -161,7 +150,7 @@ class TestInsertAndRemove(NodeTestCase):
 
     def test_removing_the_lowest_cell_reclaims_space_without_fragmenting(self):
         self.fill_leaf([b"a", b"b"])
-        self.leaf.remove_cell(1)  # b was written last, so it is the lowest cell
+        self.leaf.remove_cell(1)
         self.assertEqual(self.leaf.frag_bytes, 0)
 
     def test_removing_a_middle_cell_leaves_a_hole_until_defragmented(self):
@@ -174,8 +163,6 @@ class TestInsertAndRemove(NodeTestCase):
         self.assertEqual(self.leaf.keys(), [b"a", b"c"])
 
     def test_insert_defragments_rather_than_failing(self):
-        """Enough dead space for the cell, but not in one piece. Insert has to
-        compact the page rather than report no room."""
         big = b"x" * (MAX_CELL_SIZE - 3)
         count = 0
         while self.leaf.append_cell(leaf_cell(bytes([65 + count]), big)):
@@ -227,10 +214,8 @@ class TestSetCell(NodeTestCase):
         self.assertEqual(self.leaf.items(), [(b"a", b"w" * 500), (b"b", b"v")])
 
     def test_set_cell_returns_false_and_changes_nothing_when_it_cannot_fit(self):
-        """Pack the page with big cells, top it off with small ones, then try to
-        grow one of the small cells into a big one."""
         big = b"x" * (MAX_CELL_SIZE - 3)
-        for i in range(7):  # not the full eight: leave room for the small ones
+        for i in range(7):
             self.assertTrue(self.leaf.append_cell(leaf_cell(bytes([65 + i]), big)))
         index = 0
         while self.leaf.append_cell(leaf_cell(b"H" + bytes([index]), b"sm")):
@@ -249,7 +234,6 @@ class TestSplitIndex(NodeTestCase):
         self.assertEqual(self.leaf.split_index(cells), 5)
 
     def test_splits_by_bytes_not_by_count(self):
-        """One huge cell and many tiny ones must not split into 'all' and 'none'."""
         cells = [leaf_cell(b"a", b"x" * (MAX_CELL_SIZE - 3))] + [
             leaf_cell(bytes([66 + i]), b"v") for i in range(20)
         ]
@@ -299,7 +283,6 @@ class TestFillAccounting(NodeTestCase):
         self.assertFalse(self.leaf.is_underfull)
 
     def test_the_fill_threshold_leaves_room_for_a_whole_cell(self):
-        """The bound that makes rebalancing always possible."""
         self.assertGreaterEqual(USABLE - MIN_USED, MAX_CELL_SIZE + 4)
 
     def test_can_absorb_compares_real_usage(self):
@@ -309,14 +292,14 @@ class TestFillAccounting(NodeTestCase):
         self.assertTrue(self.leaf.can_absorb(other))
         index = 0
         while other.append_cell(leaf_cell(b"d" + bytes([index]), b"x" * 500)):
-            index += 1  # fill `other` to the brim
+            index += 1
         self.assertFalse(self.leaf.can_absorb(other))
 
 
 class TestVerify(NodeTestCase):
     def test_verify_catches_keys_out_of_order(self):
         self.leaf.append_cell(leaf_cell(b"b", b"v"))
-        self.leaf.append_cell(leaf_cell(b"a", b"v"))  # appended blindly, unsorted
+        self.leaf.append_cell(leaf_cell(b"a", b"v"))
         with self.assertRaises(NodeError):
             self.leaf.verify()
         self.leaf.remove_cell(1)

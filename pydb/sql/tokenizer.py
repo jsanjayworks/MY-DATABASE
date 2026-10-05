@@ -1,23 +1,3 @@
-"""Layer 7b: the tokenizer.
-
-Turns `SELECT name FROM people WHERE id = 42` into a flat list of tokens. This is
-the only part of the SQL layer that looks at characters; everything after it works
-on tokens, which is what keeps the parser readable.
-
-Three details worth knowing, because each is a place SQL is not like most
-languages:
-
-* **Keywords are case-insensitive, and so are identifiers.** `SELECT`, `select`
-  and `Select` are one keyword. Identifiers are folded to lower case unless they
-  are quoted with `"`, which is how a table called `Order` can exist at all.
-* **Strings use single quotes, and a quote inside one is doubled**: `'it''s'`.
-  Double quotes mean an identifier, not a string -- the opposite of most
-  languages.
-* **A keyword can be an identifier** in a position where no keyword is expected.
-  This tokenizer does not try to be clever about that; the parser decides, which
-  is why `Token.text` keeps the original spelling.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -34,9 +14,8 @@ KEYWORDS = frozenset(
     """.split()
 )
 
-# Longest first: `<=` has to be tried before `<`, or `<= 3` tokenizes as `<`, `=`.
 OPERATORS = ("<=", ">=", "<>", "!=", "=", "<", ">")
-PUNCTUATION = ",();*.+-"  # `-` is here for negative literals; `--` is a comment
+PUNCTUATION = ",();*.+-"
 
 
 class TokenType(Enum):
@@ -52,8 +31,8 @@ class TokenType(Enum):
 @dataclass(frozen=True)
 class Token:
     type: TokenType
-    value: object  # folded name, keyword, operator, or literal value
-    text: str  # exactly as it appeared, for error messages
+    value: object
+    text: str
     position: int
 
     def __str__(self) -> str:
@@ -65,7 +44,6 @@ class Token:
 
 
 def tokenize(sql: str) -> list[Token]:
-    """The whole statement as tokens, ending with a single `END` token."""
     tokens: list[Token] = []
     index = 0
     length = len(sql)
@@ -89,7 +67,6 @@ def tokenize(sql: str) -> list[Token]:
             continue
 
         if char == '"':
-            # A quoted identifier keeps its case and may contain anything.
             value, index = _read_quoted(sql, index, '"')
             tokens.append(Token(TokenType.IDENTIFIER, value, sql[start:index], start))
             continue
@@ -137,7 +114,6 @@ def tokenize(sql: str) -> list[Token]:
 
 
 def _read_quoted(sql: str, index: int, quote: str) -> tuple[str, int]:
-    """Read a quoted run starting at `index`, where a doubled quote is a literal one."""
     start = index
     index += 1
     pieces: list[str] = []

@@ -1,14 +1,3 @@
-"""Tests for layer 6, transactions.
-
-The state-machine tests are ordinary. The ones that matter are at the bottom: real
-threads, hammering the same accounts, where the only thing asserted is that money
-is neither created nor destroyed. That assertion is worth more than a dozen
-specific ones, because it fails for *any* interleaving bug rather than the ones
-someone thought to write a test for.
-
-Run with:  python -m unittest discover -s tests -v
-"""
-
 from __future__ import annotations
 
 import os
@@ -20,10 +9,10 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from pydb.buffer_pool import AllFramesPinnedError  # noqa: E402
-from pydb.database import Database, TransactionError  # noqa: E402
-from pydb.pager import META_SLOT_ROOT, FileInUseError  # noqa: E402
-from pydb.record import ColumnType, encode_key  # noqa: E402
+from pydb.buffer_pool import AllFramesPinnedError
+from pydb.database import Database, TransactionError
+from pydb.pager import META_SLOT_ROOT, FileInUseError
+from pydb.record import ColumnType, encode_key
 
 
 def int_key(value: int) -> bytes:
@@ -97,8 +86,6 @@ class TestTransactionControl(DatabaseTestCase):
         self.assertEqual(db.rollbacks, 1)
 
     def test_a_transaction_too_big_for_the_pool_rolls_back_cleanly(self):
-        """The no-steal limit from layer 5, seen from up here: it raises, the
-        context manager rolls back, and the database is still usable."""
         db = self.open(capacity=6)
         tree = db.open_tree()
         with self.assertRaises(AllFramesPinnedError):
@@ -117,10 +104,9 @@ class TestTransactionControl(DatabaseTestCase):
         with db.autocommit():
             tree.put(b"k", b"v")
         self.assertFalse(db.in_transaction)
-        self.assertEqual(db.transactions, 2)  # one for open_tree, one for this
+        self.assertEqual(db.transactions, 2)
 
     def test_autocommit_joins_an_open_transaction_instead_of_splitting_it(self):
-        """A statement must not commit half of a `BEGIN ... COMMIT` block."""
         db = self.open()
         tree = db.open_tree()
         with db.transaction():
@@ -143,9 +129,6 @@ class TestTransactionControl(DatabaseTestCase):
         self.assertIsNone(tree.get(b"a"))
 
     def test_a_failed_statement_inside_a_transaction_undoes_only_itself(self):
-        """Statement-level atomicity. The first statement and the transaction
-        survive; every change the failed one made is gone -- including the
-        overwrite of a page the first statement had already dirtied."""
         db = self.open()
         tree = db.open_tree()
         with db.transaction():
@@ -166,8 +149,6 @@ class TestTransactionControl(DatabaseTestCase):
         self.assertEqual(list(tree.items()), [(b"a", b"1")])
 
     def test_a_failed_statement_gives_back_the_pages_it_allocated(self):
-        """A statement that split its way to a new root is undone down to the
-        allocations: the root, the page count and the tree all go back."""
         db = self.open()
         tree = db.open_tree()
         with db.transaction():
@@ -194,9 +175,6 @@ class TestTransactionControl(DatabaseTestCase):
         tree.verify_invariants()
 
     def test_a_statement_too_big_for_the_pool_fails_alone(self):
-        """The no-steal limit hit by one statement no longer costs the whole
-        transaction: the statement is undone, which frees its frames, and the
-        transaction goes on."""
         db = self.open(capacity=8)
         tree = db.open_tree()
         with db.transaction():
@@ -212,9 +190,6 @@ class TestTransactionControl(DatabaseTestCase):
         tree.verify_invariants()
 
     def test_a_second_database_on_the_same_file_is_refused(self):
-        """Two handles used to be allowed, and whichever closed last overwrote
-        the other's commits without a word. Now the second one fails to open,
-        and the first carries on as if nothing happened."""
         db = self.open()
         tree = db.open_tree()
         with db.transaction():
@@ -231,7 +206,7 @@ class TestTransactionControl(DatabaseTestCase):
     def test_using_a_closed_database_is_an_error(self):
         db = Database(self.path)
         db.close()
-        db.close()  # idempotent
+        db.close()
         with self.assertRaises(TransactionError):
             db.begin()
 
@@ -248,7 +223,7 @@ class TestOpenTree(DatabaseTestCase):
         db = self.open()
         tree = db.open_tree()
         with db.transaction():
-            for i in range(2000):  # enough splits to move the root more than once
+            for i in range(2000):
                 tree.put(int_key(i), str(i).encode())
         moved_root = tree.root_page_id
         db.close()
@@ -290,13 +265,6 @@ class TestOpenTree(DatabaseTestCase):
 
 
 class Accounts:
-    """A tiny bank on top of a B+Tree, used by the concurrency tests.
-
-    Balances are 8-byte integers keyed by account number, so a transfer is two
-    reads and two writes -- the smallest operation with an invariant that spans
-    more than one page.
-    """
-
     def __init__(self, db: Database, count: int, opening_balance: int) -> None:
         self.db = db
         self.tree = db.open_tree()
@@ -320,20 +288,16 @@ class Accounts:
         )
 
     def transfer(self, source: int, target: int, amount: int) -> bool:
-        """Move `amount` if the source can afford it. Returns whether it happened."""
         with self.db.transaction():
             available = self.balance(source)
             if available < amount:
-                return False  # committing an unchanged transaction, which is fine
+                return False
             self.tree.put(int_key(source), self._encode(available - amount))
             self.tree.put(int_key(target), self._encode(self.balance(target) + amount))
             return True
 
 
 class TestMilestone(DatabaseTestCase):
-    """The layer 6 milestone from ROADMAP.md: concurrent transfers between
-    accounts never change the total."""
-
     ACCOUNTS = 20
     OPENING = 1000
     THREADS = 8
@@ -356,7 +320,7 @@ class TestMilestone(DatabaseTestCase):
                         continue
                     if bank.transfer(source, target, rng.randint(1, 300)):
                         moved[index] += 1
-            except BaseException as error:  # noqa: BLE001 - reported, not swallowed
+            except BaseException as error:
                 failures.append(error)
 
         threads = [
@@ -374,8 +338,6 @@ class TestMilestone(DatabaseTestCase):
         bank.tree.verify_invariants()
 
     def test_the_total_still_holds_after_a_reopen(self):
-        """Concurrency and durability at once: the conserved total has to survive
-        the file being closed and read back."""
         db = self.open(capacity=64)
         bank = Accounts(db, self.ACCOUNTS, self.OPENING)
 
@@ -404,7 +366,6 @@ class TestMilestone(DatabaseTestCase):
         self.assertEqual(total, self.ACCOUNTS * self.OPENING)
 
     def test_a_transfer_that_rolls_back_moves_nothing(self):
-        """Rollback under concurrency: half of a transfer must never be visible."""
         db = self.open(capacity=64)
         bank = Accounts(db, 4, 100)
 
@@ -433,12 +394,6 @@ class TestMilestone(DatabaseTestCase):
         self.assertEqual(bank.sum_all(), bank.total)
 
     def test_transactions_are_serialised_not_interleaved(self):
-        """The isolation this layer actually provides: one transaction at a time.
-
-        Each worker checks, inside its own transaction, that nobody else is in
-        one. With a global lock that is guaranteed; it is asserted because the
-        guarantee is the whole point of the layer.
-        """
         db = self.open()
         inside = []
         clashes = []

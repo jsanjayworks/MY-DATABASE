@@ -1,40 +1,19 @@
-"""Layer 7c: the AST.
-
-Plain dataclasses, no behaviour. The parser builds these, the planner reads them,
-and keeping them dumb is what stops the two from growing into each other.
-
-Two shapes here are worth understanding before reading the planner:
-
-* A **column reference carries a qualifier**: `people.name` is
-  `ColumnRef("name", "people")` and bare `name` is `ColumnRef("name", None)`. Once
-  a query can name two tables, an unqualified name may be ambiguous, and the
-  planner needs to be able to say so.
-* The **FROM clause is a tree**, not a name. `a JOIN b ON ... JOIN c ON ...` nests
-  to the left, which is the order the join will actually be executed in.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
 from pydb.record import Column
 
-# The aggregate functions, and whether each accepts `*`.
 AGGREGATES = {"COUNT", "SUM", "AVG", "MIN", "MAX"}
 
 
-# ----------------------------------------------------------------------
-# expressions
-# ----------------------------------------------------------------------
-
-
 class Expression:
-    """Base class, so a type annotation can say "any expression"."""
+    pass
 
 
 @dataclass(frozen=True)
 class Literal(Expression):
-    value: object  # int, str, or None for NULL
+    value: object
 
     def __str__(self) -> str:
         if self.value is None:
@@ -56,14 +35,7 @@ class ColumnRef(Expression):
 
 @dataclass(frozen=True)
 class FunctionCall(Expression):
-    """An aggregate call. `argument` is None for `COUNT(*)`.
-
-    Frozen and hashable on purpose: the planner uses the node itself as the key
-    for the value it computed, so an expression tree can be evaluated with the
-    aggregates already filled in.
-    """
-
-    name: str  # upper case, one of AGGREGATES
+    name: str
     argument: Expression | None = None
     distinct: bool = False
 
@@ -78,7 +50,7 @@ class FunctionCall(Expression):
 
 @dataclass(frozen=True)
 class Compare(Expression):
-    operator: str  # one of = != < <= > >=
+    operator: str
     left: Expression
     right: Expression
 
@@ -121,15 +93,8 @@ class Not(Expression):
         return f"NOT {self.operand}"
 
 
-# ----------------------------------------------------------------------
-# select list and FROM clause
-# ----------------------------------------------------------------------
-
-
 @dataclass(frozen=True)
 class Star:
-    """`*`, or `people.*` when qualified."""
-
     qualifier: str | None = None
 
     def __str__(self) -> str:
@@ -142,7 +107,6 @@ class SelectItem:
     alias: str | None = None
 
     def label(self) -> str:
-        """The column name this item produces."""
         if self.alias:
             return self.alias
         if isinstance(self.value, ColumnRef):
@@ -157,7 +121,6 @@ class TableRef:
 
     @property
     def label(self) -> str:
-        """How this table is named inside the query."""
         return self.alias or self.name
 
     def __str__(self) -> str:
@@ -168,7 +131,7 @@ class TableRef:
 class Join:
     left: "TableRef | Join"
     right: TableRef
-    kind: str = "INNER"  # INNER, LEFT or CROSS
+    kind: str = "INNER"
     condition: Expression | None = None
 
     def __str__(self) -> str:
@@ -176,13 +139,8 @@ class Join:
         return text if self.condition is None else f"{text} ON {self.condition}"
 
 
-# ----------------------------------------------------------------------
-# statements
-# ----------------------------------------------------------------------
-
-
 class Statement:
-    """Base class for the things `execute` accepts."""
+    pass
 
 
 @dataclass
@@ -217,13 +175,13 @@ class DropIndex(Statement):
 @dataclass
 class Insert(Statement):
     table: str
-    columns: list[str] | None  # None means "every column, in schema order"
+    columns: list[str] | None
     rows: list[list[Expression]]
 
 
 @dataclass
 class OrderBy:
-    value: Expression | int  # an expression, or a 1-based select-list position
+    value: Expression | int
     descending: bool = False
 
     def __str__(self) -> str:
@@ -281,13 +239,7 @@ class Rollback(Statement):
     pass
 
 
-# ----------------------------------------------------------------------
-# walking expressions
-# ----------------------------------------------------------------------
-
-
 def walk(expression: Expression | Star | None):
-    """Yield `expression` and every expression inside it, outermost first."""
     if expression is None or isinstance(expression, Star):
         return
     yield expression
@@ -302,5 +254,4 @@ def walk(expression: Expression | Star | None):
 
 
 def aggregates_in(expression: Expression | Star | None) -> list[FunctionCall]:
-    """Every aggregate call inside `expression`, outermost first."""
     return [node for node in walk(expression) if isinstance(node, FunctionCall)]

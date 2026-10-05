@@ -1,13 +1,3 @@
-"""Tests for layer 4b, the B+Tree.
-
-`verify_invariants()` runs after nearly every mutation here, which is the single
-most useful habit in this whole project: a tree can return correct answers for a
-long time while quietly rotting one level down, and the invariant check is what
-turns "wrong answer, somewhere, eventually" into "this page, this operation".
-
-Run with:  python -m unittest discover -s tests -v
-"""
-
 from __future__ import annotations
 
 import os
@@ -18,8 +8,8 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from pydb.btree import BTree, CorruptTreeError, DuplicateKeyError  # noqa: E402
-from pydb.btree_node import (  # noqa: E402
+from pydb.btree import BTree, CorruptTreeError, DuplicateKeyError
+from pydb.btree_node import (
     MAX_KEY_SIZE,
     CellTooLargeError,
     Node,
@@ -27,8 +17,8 @@ from pydb.btree_node import (  # noqa: E402
     internal_cell,
     max_value_size,
 )
-from pydb.buffer_pool import BufferPool  # noqa: E402
-from pydb.record import ColumnType, encode_key  # noqa: E402
+from pydb.buffer_pool import BufferPool
+from pydb.record import ColumnType, encode_key
 
 
 def int_key(value: int) -> bytes:
@@ -42,18 +32,17 @@ class BTreeTestCase(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.path = os.path.join(self._tmp.name, "test.db")
-        self.roots: list[int] = []  # every root this tree has ever had
+        self.roots: list[int] = []
         self.pool = BufferPool.open(self.path, capacity=self.CAPACITY)
         self.addCleanup(self.pool.close)
         self.tree = BTree.create(self.pool, on_root_change=self.roots.append)
-        self.first_root = self.tree.root_page_id  # the original, single-leaf root
+        self.first_root = self.tree.root_page_id
 
     def tearDown(self) -> None:
         self.tree.verify_invariants()
         self.pool.assert_no_pins()
 
     def reopen(self) -> BTree:
-        """Reopen the file, finding the root the same way a catalog would."""
         root = self.tree.root_page_id
         self.pool.close()
         self.pool = BufferPool.open(self.path, capacity=self.CAPACITY)
@@ -182,15 +171,12 @@ class TestSplits(BTreeTestCase):
                 self.assertEqual(self.tree.get(int_key(value)), str(value).encode())
 
     def test_invariants_hold_after_every_single_insert(self):
-        """Slow and worth it: this is what localises a split bug to one insert."""
         keys = list(range(120))
         random.Random(3).shuffle(keys)
         self.put_ints(keys, verify=True)
         self.assertEqual(self.tree.count(), 120)
 
     def test_ascending_inserts_split_correctly(self):
-        """The pathological pattern for a B+Tree: every insert lands on the last
-        leaf, so every split happens at the right edge."""
         self.put_ints(range(1000))
         self.assertEqual(self.stored_ints(), list(range(1000)))
 
@@ -199,9 +185,6 @@ class TestSplits(BTreeTestCase):
         self.assertEqual(self.stored_ints(), list(range(1, 1001)))
 
     def test_big_values_build_a_three_level_tree(self):
-        """Only ~3 cells fit in a leaf at this value size, so a few thousand keys
-        are enough to overflow the root and split an *internal* node -- the path
-        small keys would need tens of thousands of rows to reach."""
         for i in range(2500):
             self.tree.put(int_key(i), b"x" * 400)
         self.assertGreaterEqual(self.tree.height(), 3)
@@ -225,7 +208,7 @@ class TestSplits(BTreeTestCase):
 class TestRangeScans(BTreeTestCase):
     def setUp(self) -> None:
         super().setUp()
-        self.put_ints(range(0, 1000, 2))  # every even number below 1000
+        self.put_ints(range(0, 1000, 2))
 
     def test_a_bounded_range_returns_exactly_the_keys_inside_it(self):
         got = [int(v) for _k, v in self.tree.items(int_key(100), int_key(200))]
@@ -307,7 +290,6 @@ class TestDeletes(BTreeTestCase):
         self.assertEqual(self.tree.root_page_id, self.roots[-1])
 
     def test_freed_pages_come_back_from_the_pager(self):
-        """Merging frees pages; the pager should hand them out again."""
         self.put_ints(range(600))
         pages_before = self.pool.pager.page_count
         for value in range(600):
@@ -342,12 +324,6 @@ class TestDeletes(BTreeTestCase):
 
 
 class TestBorrowAndMerge(BTreeTestCase):
-    """The two rebalancing paths, forced deliberately.
-
-    Equal-sized keys merge; big values make merging impossible and force a
-    borrow, which is the path that has to rotate a separator through the parent.
-    """
-
     def test_merging_is_preferred_when_it_fits(self):
         self.put_ints(range(300))
         before = len(self.pool.pager.free_pages())
@@ -360,7 +336,7 @@ class TestBorrowAndMerge(BTreeTestCase):
 
     def test_borrowing_keeps_the_tree_valid_with_large_cells(self):
         for i in range(60):
-            self.tree.put(int_key(i), b"x" * 400)  # a handful of cells per leaf
+            self.tree.put(int_key(i), b"x" * 400)
         self.tree.verify_invariants()
         for i in range(0, 60, 2):
             self.tree.delete(int_key(i))
@@ -408,7 +384,6 @@ class TestPersistence(BTreeTestCase):
         )
 
     def test_the_root_page_id_is_what_must_be_remembered(self):
-        """Documenting the trap: reopening with a stale root loses the tree."""
         self.put_ints(range(500))
         stale_root = self.first_root
         self.assertNotEqual(stale_root, self.tree.root_page_id)
@@ -417,11 +392,9 @@ class TestPersistence(BTreeTestCase):
         self.pool = BufferPool.open(self.path, capacity=self.CAPACITY)
         self.addCleanup(self.pool.close)
         stale = BTree(self.pool, stale_root)
-        # The stale root is now just a leaf somewhere in the middle of the tree,
-        # so a lookup that should descend past it finds nothing at all.
         self.assertEqual(stale.height(), 1)
         self.assertIsNone(stale.get(int_key(499)))
-        self.tree = BTree(self.pool, root)  # the real root still sees everything
+        self.tree = BTree(self.pool, root)
         self.assertEqual(self.tree.count(), 500)
         self.assertEqual(self.tree.get(int_key(499)), b"499")
 
@@ -432,16 +405,13 @@ class TestCorruptionDetection(BTreeTestCase):
         leaf = self.tree._first_leaf()
         with self.pool.pinned(leaf, dirty=True) as data:
             original = Node(data, leaf).next_leaf
-            Node(data, leaf).next_leaf = 0  # snip the chain
+            Node(data, leaf).next_leaf = 0
         with self.assertRaises(CorruptTreeError):
             self.tree.verify_invariants()
         with self.pool.pinned(leaf, dirty=True) as data:
             Node(data, leaf).next_leaf = original
 
     def test_verify_catches_keys_outside_the_bounds_their_parent_implies(self):
-        """Move a separator without moving the keys, and the leaves below it are
-        suddenly on the wrong side of it. Every node still looks fine on its own,
-        which is exactly why the check has to be about parents and children."""
         self.put_ints(range(600))
         root = self.tree.root_page_id
         with self.pool.pinned(root, dirty=True) as data:
@@ -457,12 +427,6 @@ class TestCorruptionDetection(BTreeTestCase):
 
 
 class TestMilestone(BTreeTestCase):
-    """The layer 4 milestone from ROADMAP.md.
-
-    Insert 100 000 random keys, verify every one by lookup, range-scan and confirm
-    sorted order, then delete half and re-verify.
-    """
-
     KEYS = 100_000
     CAPACITY = 64
 

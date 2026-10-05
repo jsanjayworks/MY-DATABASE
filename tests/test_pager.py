@@ -1,11 +1,3 @@
-"""Tests for layer 1, the pager.
-
-The rule for this project: a storage test that never closes the file has not
-tested storage. Most of these reopen the database and check what survived.
-
-Run with:  python -m unittest discover -s tests -v
-"""
-
 from __future__ import annotations
 
 import os
@@ -17,7 +9,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from pydb.pager import (  # noqa: E402
+from pydb.pager import (
     MAGIC,
     META_FORMAT,
     PAGE_SIZE,
@@ -29,8 +21,6 @@ from pydb.pager import (  # noqa: E402
 
 
 class PagerTestCase(unittest.TestCase):
-    """Gives each test a fresh database path in a temp directory."""
-
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
@@ -124,7 +114,7 @@ class TestFreeList(PagerTestCase):
             first, second = pager.allocate_page(), pager.allocate_page()
             pager.free_page(first)
             self.assertEqual(pager.allocate_page(), first)
-            self.assertEqual(pager.page_count, 3)  # meta + the two originals
+            self.assertEqual(pager.page_count, 3)
             self.assertNotEqual(first, second)
 
     def test_free_list_is_lifo(self):
@@ -158,8 +148,6 @@ class TestFreeList(PagerTestCase):
 
 
 class TestPersistence(PagerTestCase):
-    """The tests that actually matter: close the file, reopen, is it right?"""
-
     def test_page_contents_survive_a_reopen(self):
         with Pager(self.path) as pager:
             page_id = pager.allocate_page()
@@ -185,12 +173,6 @@ class TestPersistence(PagerTestCase):
             self.assertEqual(pager.allocate_page(), pages[2])
 
     def test_survives_a_process_that_never_closes_the_file(self):
-        """A hard kill after sync() must not lose the write.
-
-        This is the closest thing to a real crash test we can run portably: a
-        child process writes, syncs, then exits via os._exit, which skips every
-        cleanup handler Python would normally run.
-        """
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         script = (
             "import os, sys\n"
@@ -211,13 +193,6 @@ class TestPersistence(PagerTestCase):
 
 
 class TestLocking(PagerTestCase):
-    """One open pager per file. A second would keep its own copy of the meta
-    page, and whichever wrote last would quietly undo the other's work.
-
-    A process that dies holding the lock does not strand it: the OS releases it,
-    and the crash test above reopens the file straight after one does.
-    """
-
     def test_a_second_pager_on_an_open_file_is_refused(self):
         with Pager(self.path):
             with self.assertRaises(FileInUseError):
@@ -256,7 +231,7 @@ class TestLocking(PagerTestCase):
     def test_a_rejected_header_does_not_leave_the_file_locked(self):
         with open(self.path, "wb") as f:
             f.write(b"this is a text file" + bytes(PAGE_SIZE))
-        for _ in range(2):  # the second attempt must see the header, not a lock
+        for _ in range(2):
             with self.assertRaises(CorruptFileError):
                 Pager(self.path)
 

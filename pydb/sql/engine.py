@@ -1,20 +1,3 @@
-"""Layer 7f: the engine.
-
-The front door: text in, `Result` out. Everything below has been built so that
-this file can stay thin -- parse, look the tables up in the catalog, let the
-planner choose access paths, run the pipeline.
-
-The part worth reading closely is how transactions work. Every statement runs
-inside `db.autocommit()`, so a statement on its own is its own transaction and a
-statement between `BEGIN` and `COMMIT` is part of that larger one. Which means a
-failed `INSERT INTO ... VALUES (a), (b), (c)` inserts none of them, wherever it
-runs: inside an explicit transaction it is rolled back to where it started, and
-the statements around it stay as they were.
-
-`BEGIN`, `COMMIT` and `ROLLBACK` are the exception: they *are* transaction control,
-so they talk to the database directly rather than being wrapped in it.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -47,17 +30,11 @@ __all__ = [
 
 @dataclass
 class Result:
-    """What a statement produced.
-
-    A query fills `columns` and `rows`; everything else fills `message` and, where
-    it means something, `row_count`.
-    """
-
     columns: tuple[str, ...] = ()
     rows: list[tuple] = field(default_factory=list)
     row_count: int = 0
     message: str = ""
-    plan: str = ""  # the access paths chosen, for SELECT/UPDATE/DELETE
+    plan: str = ""
 
     @property
     def is_query(self) -> bool:
@@ -76,16 +53,6 @@ class Result:
 
 
 class Engine:
-    """SQL over a `Database`.
-
-        >>> with Database("my.db") as db:
-        ...     sql = Engine(db)
-        ...     sql.execute("CREATE TABLE people (id INT PRIMARY KEY, name TEXT)")
-        ...     sql.execute("INSERT INTO people VALUES (1, 'ada')")
-        ...     sql.execute("SELECT name FROM people WHERE id = 1").rows
-        [('ada',)]
-    """
-
     def __init__(self, db: Database) -> None:
         self.db = db
         self.catalog = Catalog(db)
@@ -93,20 +60,13 @@ class Engine:
     def __repr__(self) -> str:
         return f"<Engine on {self.db.path!r}>"
 
-    # ------------------------------------------------------------------
-    # entry points
-    # ------------------------------------------------------------------
-
     def execute(self, sql: str) -> Result:
-        """Run exactly one statement."""
         return self.run(parse(sql))
 
     def execute_script(self, sql: str) -> list[Result]:
-        """Run every statement in `sql`, stopping at the first that fails."""
         return [self.run(statement) for statement in parse_script(sql)]
 
     def run(self, statement: nodes.Statement) -> Result:
-        """Run an already-parsed statement."""
         if isinstance(statement, nodes.Begin):
             self.db.begin()
             return Result(message="BEGIN")
@@ -137,7 +97,6 @@ class Engine:
             return handler(statement)
 
     def _explain(self, statement: nodes.Statement) -> Result:
-        """The plan a statement would use, without running it."""
         if isinstance(statement, nodes.Select):
             lines = planner.build_plan(statement, self._table).describe()
         elif isinstance(statement, (nodes.Delete, nodes.Update)):
@@ -149,10 +108,6 @@ class Engine:
         else:
             lines = [f"{type(statement).__name__}: nothing to plan"]
         return Result(columns=("plan",), rows=[(line,) for line in lines])
-
-    # ------------------------------------------------------------------
-    # definitions
-    # ------------------------------------------------------------------
 
     def _create_table(self, statement: nodes.CreateTable) -> Result:
         if statement.name in self.catalog:
@@ -194,15 +149,10 @@ class Engine:
         return Result(message=f"DROP INDEX {statement.name}")
 
     def _vacuum(self, _statement: nodes.Vacuum) -> Result:
-        """Squeeze the dead space out of every table's heap pages."""
         reclaimed = 0
         for name in self.catalog.table_names():
             reclaimed += self.catalog.open(name).compact()
         return Result(message=f"VACUUM reclaimed {reclaimed} bytes")
-
-    # ------------------------------------------------------------------
-    # rows
-    # ------------------------------------------------------------------
 
     def _insert(self, statement: nodes.Insert) -> Result:
         table = self._table(statement.table)
@@ -254,8 +204,6 @@ class Engine:
         table = self._table(statement.table)
         binding = planner.single_source_binding(table.name, table)
         source = planner.single_source_plan(binding, table, statement.where)
-        # Collect first, then delete: a heap scan is not a snapshot, so deleting
-        # while iterating it can skip or repeat rows.
         doomed = list(planner.scan_single(binding, source, statement.where))
         for rid, values in doomed:
             table.delete(rid, values)
@@ -295,10 +243,6 @@ class Engine:
             message=f"UPDATE {len(targets)}",
             plan=source.describe(),
         )
-
-    # ------------------------------------------------------------------
-    # helpers
-    # ------------------------------------------------------------------
 
     def _table(self, name: str) -> Table:
         if name not in self.catalog:

@@ -1,19 +1,3 @@
-"""Tests for layer 7b-7f: tokenizer, parser, planner and engine.
-
-Three groups, matching where things can go wrong:
-
-* the **tokenizer and parser**, tested on strings, where the interesting cases are
-  the ones SQL does differently from other languages -- doubled quotes, keyword
-  case, operator precedence;
-* the **planner**, where the assertion is which access path was chosen, because
-  "the right answer" is not enough: a query that returns correct rows by scanning a
-  million of them is still broken;
-* the **engine**, end to end, including what a statement does when it fails
-  half-way.
-
-Run with:  python -m unittest discover -s tests -v
-"""
-
 from __future__ import annotations
 
 import os
@@ -23,14 +7,14 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from pydb.btree import DuplicateKeyError  # noqa: E402
-from pydb.catalog import TableExistsError, UnknownTableError  # noqa: E402
-from pydb.database import Database  # noqa: E402
-from pydb.sql import nodes  # noqa: E402
-from pydb.sql.engine import Engine  # noqa: E402
-from pydb.sql.errors import ParseError, PlanError, ValueTypeError  # noqa: E402
-from pydb.sql.parser import parse, parse_script  # noqa: E402
-from pydb.sql.tokenizer import TokenType, tokenize  # noqa: E402
+from pydb.btree import DuplicateKeyError
+from pydb.catalog import TableExistsError, UnknownTableError
+from pydb.database import Database
+from pydb.sql import nodes
+from pydb.sql.engine import Engine
+from pydb.sql.errors import ParseError, PlanError, ValueTypeError
+from pydb.sql.parser import parse, parse_script
+from pydb.sql.tokenizer import TokenType, tokenize
 
 
 class TestTokenizer(unittest.TestCase):
@@ -254,7 +238,6 @@ class TestParser(unittest.TestCase):
         self.assertIsInstance(parse("SELECT * FROM t;"), nodes.Select)
         with self.assertRaises(ParseError):
             parse("SELECT * FROM t 99")
-        # A bare name after a table *is* valid: it is an alias.
         self.assertEqual(parse("SELECT * FROM t x").source.alias, "x")
 
     def test_a_script_splits_on_semicolons(self):
@@ -319,7 +302,7 @@ class TestDdl(EngineTestCase):
         self.sql.execute("CREATE TABLE t (a INT)")
         with self.assertRaises(TableExistsError):
             self.sql.execute("CREATE TABLE t (a INT)")
-        self.sql.execute("CREATE TABLE IF NOT EXISTS t (a INT)")  # no error
+        self.sql.execute("CREATE TABLE IF NOT EXISTS t (a INT)")
 
     def test_dropping_a_missing_table_is_an_error_unless_if_exists(self):
         with self.assertRaises(UnknownTableError):
@@ -374,7 +357,6 @@ class TestInsert(EngineTestCase):
             self.sql.execute("INSERT INTO people VALUES (1, 'imposter', 0)")
 
     def test_a_multi_row_insert_is_all_or_nothing(self):
-        """One statement is one transaction, so a bad third row undoes the first two."""
         self.people()
         before = len(self.rows("SELECT * FROM people"))
         with self.assertRaises(DuplicateKeyError):
@@ -441,8 +423,6 @@ class TestSelect(EngineTestCase):
         )
 
     def test_null_comparisons_are_unknown_and_filtered_out(self):
-        """Three-valued logic: row 3 has a NULL age, so it satisfies neither
-        `age = 41` nor `age != 41`. That is SQL, not a bug."""
         self.assertNotIn(3, [r[0] for r in self.rows(
             "SELECT id FROM people WHERE age = 41"
         )])
@@ -510,12 +490,6 @@ class TestSelect(EngineTestCase):
 
 
 class TestAccessPaths(EngineTestCase):
-    """Which plan was chosen, not just which rows came back.
-
-    A query that returns the right answer the slow way is still a bug, and the
-    only way to catch it is to assert on the plan.
-    """
-
     def setUp(self) -> None:
         super().setUp()
         self.people()
@@ -540,8 +514,6 @@ class TestAccessPaths(EngineTestCase):
                 self.assertIn("range", self.plan(sql))
 
     def test_a_range_bound_is_exact_at_the_edges(self):
-        """The tree's bounds and SQL's are not the same: `>` is exclusive and the
-        tree's lower bound is not, so the filter has to catch the boundary row."""
         self.assertEqual(
             sorted(r[0] for r in self.rows("SELECT id FROM people WHERE id > 2")), [3, 4]
         )
@@ -562,7 +534,6 @@ class TestAccessPaths(EngineTestCase):
         self.assertIn("seek", plan)
 
     def test_an_or_cannot_use_the_index(self):
-        """Both halves have to be considered, so the index would miss rows."""
         self.assertIn(
             "scan", self.plan("SELECT * FROM people WHERE id = 1 OR name = 'cy'")
         )
@@ -579,20 +550,14 @@ class TestAccessPaths(EngineTestCase):
         self.assertIn("scan", self.plan("SELECT * FROM logs WHERE line = 'a'"))
 
     def test_an_index_lookup_reads_far_fewer_pages_than_a_scan(self):
-        """The point of the whole exercise, measured in page reads.
-
-        Needs its own database with a pool far smaller than the table: if
-        everything is already cached, both plans read zero pages from disk and the
-        measurement proves nothing.
-        """
         path = os.path.join(self._tmp.name, "measured.db")
         db = Database(path, capacity=16)
         self.addCleanup(db.close)
         sql = Engine(db)
         sql.execute("CREATE TABLE big (id INT PRIMARY KEY, filler TEXT)")
         table = sql.catalog.open("big")
-        for batch in range(20):  # committed in batches: one transaction would
-            with db.transaction():  # outgrow a 16-frame pool
+        for batch in range(20):
+            with db.transaction():
                 for i in range(batch * 200, (batch + 1) * 200):
                     table.insert((i, f"filler-{i:06d}"))
         db.checkpoint()
@@ -727,15 +692,13 @@ class TestTransactions(EngineTestCase):
         self.assertEqual(len(self.rows("SELECT * FROM people")), 3)
 
     def test_a_statement_that_fails_part_way_inside_a_transaction_is_undone_whole(self):
-        """The test above fails before writing anything. These fail after: the
-        rows a statement had already written must not wait for COMMIT."""
         self.people()
         self.sql.execute("CREATE UNIQUE INDEX by_name ON people (name)")
         self.sql.execute("BEGIN")
         self.sql.execute("DELETE FROM people WHERE id = 4")
-        with self.assertRaises(DuplicateKeyError):  # 5 goes in, then 1 clashes
+        with self.assertRaises(DuplicateKeyError):
             self.sql.execute("INSERT INTO people VALUES (5, 'eve', 30), (1, 'x', 0)")
-        with self.assertRaises(DuplicateKeyError):  # one row renamed, then a clash
+        with self.assertRaises(DuplicateKeyError):
             self.sql.execute("UPDATE people SET name = 'same'")
         self.sql.execute("COMMIT")
         self.reopen()
@@ -753,7 +716,7 @@ class TestTransactions(EngineTestCase):
             self.sql.execute("CREATE UNIQUE INDEX by_name ON people (name)")
         self.sql.execute("COMMIT")
         self.assertNotIn("by_name", self.sql.catalog.index_names())
-        self.sql.execute("CREATE INDEX by_name ON people (name)")  # the name is free
+        self.sql.execute("CREATE INDEX by_name ON people (name)")
         self.sql.catalog.open("people").verify()
 
 

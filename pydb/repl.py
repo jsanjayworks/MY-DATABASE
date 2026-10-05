@@ -1,27 +1,3 @@
-"""Layer 7g: the REPL.
-
-    $ python -m pydb my.db
-    pydb> CREATE TABLE people (id INT PRIMARY KEY, name TEXT);
-    CREATE TABLE people
-    pydb> INSERT INTO people VALUES (1, 'ada');
-    INSERT 1
-    pydb> SELECT * FROM people;
-    id  name
-    --  ----
-    1   ada
-    (1 row)
-
-Statements run when they are terminated by a semicolon, so one can span several
-lines. Lines beginning with a dot are commands to the shell rather than SQL --
-`.tables`, `.schema`, `.plan`, `.help`, `.quit` -- which is the convention `sqlite3`
-uses and there is no reason to invent a different one.
-
-A SQL error prints as a message and the session continues. That matters more than
-it sounds: a traceback from a typo would make the thing unusable, and a REPL that
-exits on a bad query is not a REPL. A bug in pydb itself does not end the session
-either, but it is labelled as one, so it does not read like a mistake in the SQL.
-"""
-
 from __future__ import annotations
 
 import sys
@@ -56,8 +32,6 @@ Types are INT and TEXT. Prefix any statement with EXPLAIN to see its plan."""
 
 
 class Repl:
-    """The read-eval-print loop, with the input and output injectable for tests."""
-
     def __init__(
         self,
         engine: Engine,
@@ -68,20 +42,13 @@ class Repl:
         self.engine = engine
         self.stdin = stdin or sys.stdin
         self.stdout = stdout or sys.stdout
-        # Prompts are noise when the input is a script, and essential when it is a
-        # person. `isatty` is the difference.
         self.interactive = (
             self.stdin.isatty() if interactive is None else interactive
         )
         self.show_plan = False
         self.errors = 0
 
-    # ------------------------------------------------------------------
-    # the loop
-    # ------------------------------------------------------------------
-
     def run(self) -> int:
-        """Read until the input ends. Returns the number of statements that failed."""
         for statement in self._statements():
             try:
                 if statement.startswith("."):
@@ -91,20 +58,19 @@ class Repl:
                     self._run_sql(statement)
             except PydbError as error:
                 self._fail(error)
-            except Exception as error:  # noqa: BLE001 - a REPL must not die on one
+            except Exception as error:
                 self._fail(error, internal=True)
         return self.errors
 
     def _statements(self) -> Iterator[str]:
-        """Yield complete statements: dot commands, or SQL up to a semicolon."""
         buffer = ""
         while True:
             self._prompt(CONTINUATION if buffer else PROMPT)
             line = self.stdin.readline()
-            if not line:  # end of input
+            if not line:
                 trailing = buffer.strip()
                 if trailing and not trailing.startswith("--"):
-                    yield trailing  # a last statement with no semicolon
+                    yield trailing
                 self._write("\n" if self.interactive else "")
                 return
             stripped = line.strip()
@@ -114,17 +80,12 @@ class Repl:
                 yield stripped
                 continue
             buffer += line
-            # One line can hold several statements, so keep splitting until the
-            # rest of the buffer has no terminator left in it.
             while True:
                 statement, buffer = _split_statement(buffer)
                 if statement is None:
                     break
                 if statement.strip().rstrip(";").strip():
                     yield statement.strip()
-            # Whatever follows the last semicolon is the start of the next
-            # statement, and leading whitespace would make an empty remainder look
-            # like a statement still being typed.
             buffer = buffer.lstrip()
 
     def _run_sql(self, sql: str) -> None:
@@ -136,12 +97,7 @@ class Repl:
         else:
             self._write(result.message + "\n")
 
-    # ------------------------------------------------------------------
-    # dot commands
-    # ------------------------------------------------------------------
-
     def _command(self, line: str) -> bool:
-        """Run a dot command. Returns True if the session should end."""
         parts = line.split()
         name, arguments = parts[0].lower(), parts[1:]
 
@@ -195,10 +151,6 @@ class Repl:
                 lines.append(f"{index.name}  {kind} on {name}({column})")
         self._write(("\n".join(lines) if lines else "no indexes") + "\n")
 
-    # ------------------------------------------------------------------
-    # output
-    # ------------------------------------------------------------------
-
     def _prompt(self, text: str) -> None:
         if self.interactive:
             self._write(text)
@@ -216,13 +168,6 @@ class Repl:
 
 
 def _split_statement(buffer: str) -> tuple[str | None, str]:
-    """Split off the first complete statement. Returns `(statement, rest)`.
-
-    A statement ends at the first semicolon that is not inside a string literal or
-    a comment -- `INSERT INTO t VALUES ('a;b');` is one statement, not two. When
-    there is no such semicolon the statement is still being typed, so the whole
-    buffer comes back as the remainder.
-    """
     in_string = False
     index = 0
     while index < len(buffer):
@@ -238,7 +183,7 @@ def _split_statement(buffer: str) -> tuple[str | None, str]:
         elif char == "-" and buffer.startswith("--", index):
             newline = buffer.find("\n", index)
             if newline < 0:
-                return None, buffer  # the comment has not been closed by a newline
+                return None, buffer
             index = newline
         elif char == ";":
             return buffer[: index + 1], buffer[index + 1 :]
@@ -247,7 +192,6 @@ def _split_statement(buffer: str) -> tuple[str | None, str]:
 
 
 def describe_table(info) -> str:
-    """The `CREATE` statements that would rebuild this table and its indexes."""
     parts = []
     for column in info.schema:
         piece = f"{column.name} {column.type}"
@@ -259,7 +203,7 @@ def describe_table(info) -> str:
     lines = [f"CREATE TABLE {info.name} (\n  " + ",\n  ".join(parts) + "\n);"]
     for index in info.indexes:
         if index.primary:
-            continue  # already shown as PRIMARY KEY above
+            continue
         unique = "UNIQUE " if index.unique else ""
         column = info.schema.columns[index.column].name
         lines.append(f"CREATE {unique}INDEX {index.name} ON {info.name}({column});")
@@ -267,7 +211,6 @@ def describe_table(info) -> str:
 
 
 def format_table(result: Result) -> str:
-    """A result as aligned columns, with a row count underneath."""
     headers = [str(name) for name in result.columns]
     body = [[_cell(value) for value in row] for row in result.rows]
     widths = [len(header) for header in headers]
@@ -289,7 +232,6 @@ def _cell(value: object) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """`python -m pydb <database>`. Returns a process exit status."""
     arguments = list(sys.argv[1:] if argv is None else argv)
     if not arguments or arguments[0] in ("-h", "--help"):
         sys.stdout.write("usage: python -m pydb <database file>\n")

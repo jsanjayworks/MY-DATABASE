@@ -1,12 +1,3 @@
-"""Tests for the error hierarchy: one base class under every layer's errors.
-
-Each layer's errors were written before the layers above existed, so a failed
-statement can raise any of a dozen unrelated families. The point of `PydbError` is
-that a caller needs to catch exactly one thing to mean "the database refused".
-
-Run with:  python -m unittest discover -s tests -v
-"""
-
 from __future__ import annotations
 
 import inspect
@@ -17,8 +8,8 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pydb  # noqa: E402
-from pydb import Database, Engine, PydbError  # noqa: E402
+import pydb
+from pydb import Database, Engine, PydbError
 
 
 class TestHierarchy(unittest.TestCase):
@@ -34,8 +25,6 @@ class TestHierarchy(unittest.TestCase):
 
 
 class TestFailedStatements(unittest.TestCase):
-    """Statements that fail in different layers, all caught the same way."""
-
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
