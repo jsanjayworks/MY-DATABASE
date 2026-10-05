@@ -179,6 +179,32 @@ class TestErrorHandling(ReplTestCase):
         self.assertIn("no such table", output)
         self.assertIn("(0 rows)", output)
 
+    def test_a_bug_in_pydb_is_labelled_as_one(self):
+        """A refused statement and a broken database are different news."""
+        with Database(self.path) as db:
+            engine = Engine(db)
+            engine.execute("CREATE TABLE t (id INT PRIMARY KEY)")
+            real_execute = engine.execute
+
+            def execute(sql: str):
+                if sql.startswith("SELECT"):
+                    raise TypeError("something pydb got wrong")
+                return real_execute(sql)
+
+            engine.execute = execute
+            output = io.StringIO()
+            repl = Repl(
+                engine,
+                stdin=io.StringIO("SELECT * FROM t;\nINSERT INTO t VALUES (1), (1);\n"),
+                stdout=output,
+                interactive=False,
+            )
+            failures = repl.run()
+        lines = output.getvalue().splitlines()
+        self.assertEqual(failures, 2)
+        self.assertTrue(lines[0].startswith("internal error (TypeError):"), lines)
+        self.assertTrue(lines[1].startswith("error: "), lines)  # a duplicate key
+
     def test_a_type_error_names_the_column(self):
         output, failures = self.session(
             "CREATE TABLE t (a INT);\nINSERT INTO t VALUES ('x');\n"

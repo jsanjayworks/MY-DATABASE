@@ -44,8 +44,9 @@ from pydb.catalog import (
     UnknownTableError,
 )
 from pydb.database import Database, TransactionError
+from pydb.errors import PydbError
 from pydb.heap import HeapError, HeapFile, RowId, RowNotFoundError
-from pydb.pager import PAGE_SIZE, CorruptFileError, Pager, PagerError
+from pydb.pager import PAGE_SIZE, CorruptFileError, FileInUseError, Pager, PagerError
 from pydb.record import (
     Column,
     ColumnType,
@@ -60,11 +61,14 @@ from pydb.sql import Engine, ParseError, PlanError, Result, SqlError, ValueTypeE
 from pydb.wal import CorruptWalError, Wal, WalError
 
 __all__ = [
+    # every deliberate error, whichever layer raised it
+    "PydbError",
     # layer 1
     "PAGE_SIZE",
     "Pager",
     "PagerError",
     "CorruptFileError",
+    "FileInUseError",
     # layer 2
     "BufferPool",
     "BufferPoolError",

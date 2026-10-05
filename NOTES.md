@@ -36,6 +36,25 @@ registry lives in `pager.py` so that two layers cannot claim the same slot.
 
 Bytes 84..4095 of the meta page are reserved (zero).
 
+## The lock
+
+One pager per file, at once. A second would keep its own copy of the meta page
+and its own cached pages, and whichever wrote last would silently overwrite the
+other's commits. That is not a hypothetical: before the lock, two `Database`
+objects on one file inserted 900 rows between them and 600 survived. Opening a
+file that is already open now raises `FileInUseError`.
+
+- **Windows:** byte `2**32 * 4096` is locked with `msvcrt.locking`. Windows locks
+  are mandatory -- a locked byte cannot be read through another handle -- so the
+  lock sits on a byte no page can occupy: page ids are four bytes, so no file is
+  longer than 2³² pages. Nothing is written there; locking past the end of a file
+  is allowed. SQLite locks bytes past its data for the same reason.
+- **POSIX:** `flock` on the whole file, and specifically not `fcntl`/`lockf`.
+  Those locks belong to the process, so a second open in the same process would
+  be granted the lock, and closing either descriptor would drop it for both.
+
+The OS releases either kind when a process dies, so a crash never strands it.
+
 ## Free pages
 
 A freed page is not returned to the OS; it joins a singly-linked free list
@@ -267,6 +286,23 @@ outgrow the buffer pool** — it raises `AllFramesPinnedError` instead. The
 alternative is writing undo records as well as redo, which is a layer of its own.
 Rollback is then simply forgetting: drop the modified frames and let them be read
 from the data file again.
+
+### Rolling back one statement
+
+Forgetting only works for the whole transaction. A failed statement inside
+`BEGIN ... COMMIT` must be undone on its own -- an `UPDATE` that hits a duplicate
+key on its third row must not leave the first two changed for `COMMIT` to keep --
+and a page an earlier statement dirtied exists in its pre-statement form nowhere
+but in its frame, which the failing statement has just written over.
+
+So each statement inside a transaction starts with a savepoint: a copy of every
+page the transaction has dirtied so far, how many frees are staged, and the meta
+state. Undoing to it drops the pages first dirtied since (the data file still has
+them as committed), copies the rest back, and re-derives cached root ids and
+table definitions exactly as a full rollback does. No-steal is what keeps the
+copy cheap: every uncommitted page is resident, and there are at most as many as
+the pool has frames. A statement run on its own needs none of this; its
+transaction is the statement.
 
 ### Still true after a crash, and not before
 

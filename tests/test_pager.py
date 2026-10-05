@@ -22,6 +22,7 @@ from pydb.pager import (  # noqa: E402
     META_FORMAT,
     PAGE_SIZE,
     CorruptFileError,
+    FileInUseError,
     Pager,
     PagerError,
 )
@@ -207,6 +208,57 @@ class TestPersistence(PagerTestCase):
         with Pager(self.path) as pager:
             self.assertEqual(pager.page_count, 2)
             self.assertEqual(pager.read_page(1)[:18], b"survived the crash")
+
+
+class TestLocking(PagerTestCase):
+    """One open pager per file. A second would keep its own copy of the meta
+    page, and whichever wrote last would quietly undo the other's work.
+
+    A process that dies holding the lock does not strand it: the OS releases it,
+    and the crash test above reopens the file straight after one does.
+    """
+
+    def test_a_second_pager_on_an_open_file_is_refused(self):
+        with Pager(self.path):
+            with self.assertRaises(FileInUseError):
+                Pager(self.path)
+
+    def test_the_file_is_free_again_once_closed(self):
+        Pager(self.path).close()
+        with Pager(self.path) as pager:
+            self.assertEqual(pager.page_count, 1)
+
+    def test_a_refused_open_leaves_the_first_pager_working(self):
+        with Pager(self.path) as pager:
+            with self.assertRaises(FileInUseError):
+                Pager(self.path)
+            page_id = pager.allocate_page()
+            pager.write_page(page_id, b"still mine")
+        with Pager(self.path) as pager:
+            self.assertEqual(pager.read_page(page_id)[:10], b"still mine")
+
+    def test_another_process_is_refused_too(self):
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        script = (
+            "import sys\n"
+            f"sys.path.insert(0, {project_root!r})\n"
+            "from pydb.pager import FileInUseError, Pager\n"
+            "try:\n"
+            f"    Pager({self.path!r}).close()\n"
+            "    print('opened')\n"
+            "except FileInUseError:\n"
+            "    print('refused')\n"
+        )
+        with Pager(self.path):
+            result = subprocess.run([sys.executable, "-c", script], capture_output=True)
+        self.assertEqual(result.stdout.strip(), b"refused", result.stderr.decode())
+
+    def test_a_rejected_header_does_not_leave_the_file_locked(self):
+        with open(self.path, "wb") as f:
+            f.write(b"this is a text file" + bytes(PAGE_SIZE))
+        for _ in range(2):  # the second attempt must see the header, not a lock
+            with self.assertRaises(CorruptFileError):
+                Pager(self.path)
 
 
 class TestCorruption(PagerTestCase):

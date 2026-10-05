@@ -726,6 +726,36 @@ class TestTransactions(EngineTestCase):
         self.sql.execute("COMMIT")
         self.assertEqual(len(self.rows("SELECT * FROM people")), 3)
 
+    def test_a_statement_that_fails_part_way_inside_a_transaction_is_undone_whole(self):
+        """The test above fails before writing anything. These fail after: the
+        rows a statement had already written must not wait for COMMIT."""
+        self.people()
+        self.sql.execute("CREATE UNIQUE INDEX by_name ON people (name)")
+        self.sql.execute("BEGIN")
+        self.sql.execute("DELETE FROM people WHERE id = 4")
+        with self.assertRaises(DuplicateKeyError):  # 5 goes in, then 1 clashes
+            self.sql.execute("INSERT INTO people VALUES (5, 'eve', 30), (1, 'x', 0)")
+        with self.assertRaises(DuplicateKeyError):  # one row renamed, then a clash
+            self.sql.execute("UPDATE people SET name = 'same'")
+        self.sql.execute("COMMIT")
+        self.reopen()
+        self.assertEqual(
+            self.rows("SELECT * FROM people ORDER BY id"),
+            [(1, "ada", 36), (2, "bob", 41), (3, "cy", None)],
+        )
+        self.sql.catalog.open("people").verify()
+
+    def test_an_index_that_fails_to_build_inside_a_transaction_leaves_nothing(self):
+        self.people()
+        self.sql.execute("INSERT INTO people VALUES (5, 'ada', 1)")
+        self.sql.execute("BEGIN")
+        with self.assertRaises(DuplicateKeyError):
+            self.sql.execute("CREATE UNIQUE INDEX by_name ON people (name)")
+        self.sql.execute("COMMIT")
+        self.assertNotIn("by_name", self.sql.catalog.index_names())
+        self.sql.execute("CREATE INDEX by_name ON people (name)")  # the name is free
+        self.sql.catalog.open("people").verify()
+
 
 class TestPersistence(EngineTestCase):
     def test_everything_survives_a_reopen(self):

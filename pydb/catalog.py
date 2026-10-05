@@ -41,6 +41,7 @@ from typing import Iterator
 from pydb.btree import BTree, DuplicateKeyError
 from pydb.btree_node import max_value_size
 from pydb.database import Database
+from pydb.errors import PydbError
 from pydb.heap import HeapFile, RowId
 from pydb.pager import META_SLOT_ROOT, NULL_PAGE_ID
 from pydb.record import Column, ColumnType, Schema, encode_key
@@ -62,7 +63,7 @@ KEY_TABLE = b"t"
 KEY_INDEX = b"i"
 
 
-class CatalogError(Exception):
+class CatalogError(PydbError):
     """Base class for catalog errors."""
 
 

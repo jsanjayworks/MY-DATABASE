@@ -12,6 +12,14 @@ from __future__ import annotations
 
 import os
 import struct
+import sys
+
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import fcntl
+
+from pydb.errors import PydbError
 
 PAGE_SIZE = 4096
 
@@ -42,13 +50,28 @@ FREE_NEXT_SIZE = struct.calcsize(FREE_NEXT_FORMAT)
 
 ZERO_PAGE = bytes(PAGE_SIZE)
 
+# The byte locked on Windows to say "this file is open". Windows locks are
+# mandatory -- a locked byte cannot be read through any other handle -- so it is
+# one no page can ever occupy: page ids are four bytes, so no file is longer than
+# 2**32 pages. SQLite locks bytes past the data for the same reason.
+LOCK_OFFSET = 2**32 * PAGE_SIZE
 
-class PagerError(Exception):
+
+class PagerError(PydbError):
     """Base class for every error the pager raises."""
 
 
 class CorruptFileError(PagerError):
     """The file on disk is not a pydb database, or its header is damaged."""
+
+
+class FileInUseError(PagerError):
+    """Something else already has the file open: another pager, or another process.
+
+    Two at once is not a race to be managed but a guaranteed loss. Each one
+    caches its own copy of the meta page and its own pages, so whichever writes
+    last silently overwrites the other's commits.
+    """
 
 
 class Pager:
@@ -78,6 +101,7 @@ class Pager:
         self.defer_meta = False
         self._meta_dirty = False
         self._file = None
+        self._locked = False
         self._open()
 
     # ------------------------------------------------------------------
@@ -91,6 +115,7 @@ class Pager:
             open(self.path, "wb").close()
         self._file = open(self.path, "r+b", buffering=0)
         try:
+            self._lock()
             if is_new:
                 self._write_page_raw(META_PAGE_ID, ZERO_PAGE)
                 self._write_meta()
@@ -99,6 +124,7 @@ class Pager:
         except Exception:
             # A rejected header must not leave the handle dangling: __init__ is
             # about to raise, so nothing will ever call close().
+            self._unlock()
             self._file.close()
             self._file = None
             raise
@@ -108,8 +134,45 @@ class Pager:
         if self._file is None:
             return
         self.sync()
+        self._unlock()
         self._file.close()
         self._file = None
+
+    def _lock(self) -> None:
+        """Claim the file for this pager alone, or raise `FileInUseError`.
+
+        On POSIX this has to be `flock`, not `fcntl`/`lockf`. Those locks belong
+        to the *process*, so a second open in the same process would be granted
+        the lock -- and closing either descriptor would drop it for both.
+        `flock` belongs to the open file, so two pagers in one process conflict
+        exactly as two in separate processes do. Either kind is released by the
+        OS when a process dies, so a crash never leaves the file locked.
+        """
+        try:
+            if sys.platform == "win32":
+                self._file.seek(LOCK_OFFSET)
+                msvcrt.locking(self._file.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                fcntl.flock(self._file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            raise FileInUseError(
+                f"{self.path} is already open, in this process or another; "
+                f"close it there first"
+            ) from error
+        self._locked = True
+
+    def _unlock(self) -> None:
+        if not self._locked:
+            return
+        if sys.platform == "win32":
+            # Closing the handle would release it too, but Windows documents that
+            # as happening "eventually"; a reopen right after close must not lose
+            # that race.
+            self._file.seek(LOCK_OFFSET)
+            msvcrt.locking(self._file.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            fcntl.flock(self._file.fileno(), fcntl.LOCK_UN)
+        self._locked = False
 
     def sync(self) -> None:
         """Force everything written so far all the way down to the platter.

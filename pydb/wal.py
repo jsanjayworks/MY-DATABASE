@@ -49,6 +49,7 @@ import struct
 import zlib
 
 from pydb.buffer_pool import BufferPool
+from pydb.errors import PydbError
 from pydb.pager import META_PAGE_ID, PAGE_SIZE
 
 WAL_MAGIC = b"PYDBWAL\x00"
@@ -66,7 +67,7 @@ FRAME_SIZE = FRAME_HEADER_SIZE + PAGE_SIZE
 FLAG_COMMIT = 1  # this frame is the last of a committed transaction
 
 
-class WalError(Exception):
+class WalError(PydbError):
     """Base class for log errors."""
 
 
@@ -253,6 +254,46 @@ class Wal:
         # changes nothing. It is here to clear the deferred-write flag honestly
         # rather than by poking at it.
         self.pager.flush_meta()
+
+    def savepoint(self) -> tuple:
+        """Remember this transaction as it stands, so `rollback_to` can return here.
+
+        This is what makes one statement atomic inside a bigger transaction. A
+        full rollback can just forget, because the data file holds every page as
+        it was at the last commit. Going back only part of the way cannot: a page
+        an earlier statement changed exists in its pre-statement form nowhere but
+        in its frame, which the next statement is about to write over. So the
+        frames this transaction has already dirtied are copied now.
+
+        No-steal is what keeps that affordable. An uncommitted page is never
+        evicted, so every one of them is resident and there are at most as many
+        as the pool has frames.
+        """
+        self._require_open()
+        images = {}
+        for page_id in self._dirty:
+            data = self.pool.peek_page(page_id)
+            assert data is not None, f"uncommitted page {page_id} was evicted"
+            images[page_id] = bytes(data)
+        return images, len(self._frees), self.pager.meta_state()
+
+    def rollback_to(self, savepoint: tuple) -> None:
+        """Undo everything since `savepoint`, keeping the transaction open.
+
+        A page first dirtied since then is dropped and re-read from the data file,
+        exactly as in a full rollback, because nothing earlier in the transaction
+        touched it. A page dirtied before then gets its copy back.
+        """
+        self._require_open()
+        images, frees, meta = savepoint
+        for page_id in self._dirty:
+            if page_id not in images:
+                self.pool.discard_page(page_id)
+        for page_id, image in images.items():
+            self.pool.peek_page(page_id)[:] = image
+        self._dirty = dict.fromkeys(images)
+        del self._frees[frees:]
+        self.pager.restore_meta_state(meta)
 
     # ------------------------------------------------------------------
     # checkpointing

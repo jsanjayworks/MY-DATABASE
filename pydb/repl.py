@@ -18,7 +18,8 @@ uses and there is no reason to invent a different one.
 
 A SQL error prints as a message and the session continues. That matters more than
 it sounds: a traceback from a typo would make the thing unusable, and a REPL that
-exits on a bad query is not a REPL.
+exits on a bad query is not a REPL. A bug in pydb itself does not end the session
+either, but it is labelled as one, so it does not read like a mistake in the SQL.
 """
 
 from __future__ import annotations
@@ -27,7 +28,8 @@ import sys
 from typing import Iterator, TextIO
 
 from pydb.database import Database
-from pydb.sql import Engine, Result, SqlError
+from pydb.errors import PydbError
+from pydb.sql import Engine, Result
 
 PROMPT = "pydb> "
 CONTINUATION = "  ...> "
@@ -87,10 +89,10 @@ class Repl:
                         break
                 else:
                     self._run_sql(statement)
-            except SqlError as error:
+            except PydbError as error:
                 self._fail(error)
             except Exception as error:  # noqa: BLE001 - a REPL must not die on one
-                self._fail(error)
+                self._fail(error, internal=True)
         return self.errors
 
     def _statements(self) -> Iterator[str]:
@@ -205,9 +207,12 @@ class Repl:
         self.stdout.write(text)
         self.stdout.flush()
 
-    def _fail(self, error: Exception) -> None:
+    def _fail(self, error: Exception, internal: bool = False) -> None:
         self.errors += 1
-        self._write(f"error: {error}\n")
+        if internal:
+            self._write(f"internal error ({type(error).__name__}): {error}\n")
+        else:
+            self._write(f"error: {error}\n")
 
 
 def _split_statement(buffer: str) -> tuple[str | None, str]:

@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import struct
 
+from pydb.errors import PydbError
 from pydb.pager import PAGE_SIZE
 
 PAGE_TYPE_INTERNAL = 2
@@ -75,7 +76,7 @@ MAX_KEY_SIZE = MAX_CELL_SIZE - KEY_LEN_SIZE - CHILD_SIZE
 MIN_USED = USABLE // 5
 
 
-class NodeError(Exception):
+class NodeError(PydbError):
     """A node's bytes are inconsistent, or an index is out of range."""
 
 

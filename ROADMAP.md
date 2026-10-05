@@ -181,11 +181,33 @@ frame was still in the buffer pool**, so the next allocation handed out a page i
 the pool already held. The fix is three lines; finding it took the guard added back
 in layer 2 for a different reason.
 
+### What probing it from outside found
+
+Every milestone passed, and throwing odd SQL at it from the outside still found two
+ways to lose data without an error:
+
+- **A statement that failed inside `BEGIN ... COMMIT` was half-applied.** On its
+  own a statement was its own transaction, so a failure rolled it back. Inside an
+  explicit one there was nothing to roll back *to*: an `UPDATE` that hit a
+  duplicate key on its second row kept its first, and `COMMIT` made that durable.
+  The existing test only failed before writing anything, which is why it passed.
+  Statements now take a savepoint (see `NOTES.md`).
+- **Two handles on one file overwrote each other.** Nothing stopped a second
+  `Database` from opening a file that was already open. Each cached its own meta
+  page, and 300 of 900 rows vanished. The pager now locks the file.
+
+Smaller, and also fixed: every error pydb raises on purpose now descends from
+`PydbError`, so `except SqlError` is no longer the trap it was when a duplicate key
+came from the B+Tree.
+
 ## Where this stops
 
 The honest list of what a real database has that this one still does not:
 
 - **Subqueries and set operations.** No `IN (SELECT ...)`, no `UNION`.
+- **Expressions.** A value is a column, a literal or an aggregate, never a
+  computation: no `n + 1` (so no `UPDATE t SET n = n + 1`), no `SELECT 1`, no
+  `||`, no scalar functions. No `LIKE`, `IN (1, 2)` or `BETWEEN` either.
 - **Overflow pages.** A row is capped at 4080 bytes and a tree value at ~496, which
   also caps a table definition at roughly 24 columns.
 - **Real isolation.** One global lock, so no two transactions ever overlap. 2PL or

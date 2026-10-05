@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from pydb.buffer_pool import AllFramesPinnedError  # noqa: E402
 from pydb.database import Database, TransactionError  # noqa: E402
-from pydb.pager import META_SLOT_ROOT  # noqa: E402
+from pydb.pager import META_SLOT_ROOT, FileInUseError  # noqa: E402
 from pydb.record import ColumnType, encode_key  # noqa: E402
 
 
@@ -141,6 +141,92 @@ class TestTransactionControl(DatabaseTestCase):
                     tree.put(b"a", b"1")
                 raise ValueError
         self.assertIsNone(tree.get(b"a"))
+
+    def test_a_failed_statement_inside_a_transaction_undoes_only_itself(self):
+        """Statement-level atomicity. The first statement and the transaction
+        survive; every change the failed one made is gone -- including the
+        overwrite of a page the first statement had already dirtied."""
+        db = self.open()
+        tree = db.open_tree()
+        with db.transaction():
+            with db.autocommit():
+                tree.put(b"a", b"1")
+            with self.assertRaises(ValueError):
+                with db.autocommit():
+                    tree.put(b"a", b"overwritten")
+                    tree.put(b"b", b"2")
+                    raise ValueError
+            self.assertTrue(db.in_transaction)
+            self.assertEqual(tree.get(b"a"), b"1")
+            self.assertIsNone(tree.get(b"b"))
+        self.assertEqual((db.rollbacks, db.statement_rollbacks), (0, 1))
+        db.close()
+
+        tree = self.open().open_tree()
+        self.assertEqual(list(tree.items()), [(b"a", b"1")])
+
+    def test_a_failed_statement_gives_back_the_pages_it_allocated(self):
+        """A statement that split its way to a new root is undone down to the
+        allocations: the root, the page count and the tree all go back."""
+        db = self.open()
+        tree = db.open_tree()
+        with db.transaction():
+            with db.autocommit():
+                for i in range(50):
+                    tree.put(int_key(i), b"x" * 40)
+            root, pages = tree.root_page_id, len(db.pager)
+            with self.assertRaises(RuntimeError):
+                with db.autocommit():
+                    for i in range(50, 600):
+                        tree.put(int_key(i), b"x" * 40)
+                    self.assertNotEqual(tree.root_page_id, root, "root never moved")
+                    raise RuntimeError
+            self.assertEqual(tree.root_page_id, root)
+            self.assertEqual(len(db.pager), pages)
+            self.assertEqual(tree.count(), 50)
+            tree.verify_invariants()
+            with db.autocommit():
+                tree.put(b"after", b"1")
+        db.close()
+
+        tree = self.open().open_tree()
+        self.assertEqual(tree.count(), 51)
+        tree.verify_invariants()
+
+    def test_a_statement_too_big_for_the_pool_fails_alone(self):
+        """The no-steal limit hit by one statement no longer costs the whole
+        transaction: the statement is undone, which frees its frames, and the
+        transaction goes on."""
+        db = self.open(capacity=8)
+        tree = db.open_tree()
+        with db.transaction():
+            with db.autocommit():
+                tree.put(b"keep", b"1")
+            with self.assertRaises(AllFramesPinnedError):
+                with db.autocommit():
+                    for i in range(5000):
+                        tree.put(int_key(i), b"x" * 400)
+            with db.autocommit():
+                tree.put(b"after", b"2")
+        self.assertEqual(list(tree.items()), [(b"after", b"2"), (b"keep", b"1")])
+        tree.verify_invariants()
+
+    def test_a_second_database_on_the_same_file_is_refused(self):
+        """Two handles used to be allowed, and whichever closed last overwrote
+        the other's commits without a word. Now the second one fails to open,
+        and the first carries on as if nothing happened."""
+        db = self.open()
+        tree = db.open_tree()
+        with db.transaction():
+            tree.put(b"first", b"1")
+        with self.assertRaises(FileInUseError):
+            Database(self.path)
+        with db.transaction():
+            tree.put(b"second", b"2")
+        db.close()
+
+        tree = self.open().open_tree()
+        self.assertEqual(list(tree.items()), [(b"first", b"1"), (b"second", b"2")])
 
     def test_using_a_closed_database_is_an_error(self):
         db = Database(self.path)

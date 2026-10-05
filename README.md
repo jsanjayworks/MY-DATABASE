@@ -98,7 +98,12 @@ against 6.9s.** A single lookup on a 4000-row table with a 16-frame buffer pool 
 **1 page read against 30** for the equivalent scan. `EXPLAIN` shows which path was
 chosen.
 
-No subqueries, no `UNION`, no composite keys. `INT` and `TEXT` only.
+No subqueries, no `UNION`, no composite keys. No arithmetic either (`n + 1`,
+`SELECT 1`), and no `LIKE`, `IN` or `BETWEEN`. `INT` and `TEXT` only.
+
+A statement that fails inside `BEGIN ... COMMIT` is undone on its own and the
+transaction carries on. One process at a time: opening a file that is already open
+raises `FileInUseError`.
 
 ## Requirements
 
@@ -111,7 +116,7 @@ Python 3.10+ (uses `X | Y` type syntax). Nothing else — `struct`, `os.fsync` a
 python -m unittest discover -s tests -v
 ```
 
-489 tests, about 40 seconds. Several are deliberately heavy, because the
+505 tests, about 50 seconds. Several are deliberately heavy, because the
 milestones are:
 
 - a 100 MB file driven through a 50-frame buffer pool;
@@ -137,6 +142,9 @@ with Database("my.db") as db:
     print(sql.execute("SELECT name FROM people ORDER BY id").rows)
 ```
 
+Every error pydb raises on purpose -- bad SQL, a duplicate key, a NOT NULL column,
+a file already in use -- is a `pydb.PydbError`, whichever layer found it.
+
 Every layer is usable on its own, which is how they were tested:
 
 ```python
@@ -154,6 +162,7 @@ tree.verify_invariants()
 
 ```
 pydb/
+  errors.py                 PydbError, underneath every layer's own errors
   pager.py         layer 1  one file as an array of 4 KB pages
   buffer_pool.py   layer 2  those pages cached, with pins and clock eviction
   record.py        layer 3  schemas, row encoding, order-preserving keys

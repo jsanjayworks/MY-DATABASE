@@ -49,10 +49,11 @@ from pydb.btree_node import (
     max_value_size,
 )
 from pydb.buffer_pool import BufferPool
+from pydb.errors import PydbError
 from pydb.pager import NULL_PAGE_ID
 
 
-class BTreeError(Exception):
+class BTreeError(PydbError):
     """Base class for tree-level errors."""
 
 

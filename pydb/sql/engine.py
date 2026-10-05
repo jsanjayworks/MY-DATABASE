@@ -7,9 +7,9 @@ planner choose access paths, run the pipeline.
 The part worth reading closely is how transactions work. Every statement runs
 inside `db.autocommit()`, so a statement on its own is its own transaction and a
 statement between `BEGIN` and `COMMIT` is part of that larger one. Which means a
-failed `INSERT INTO ... VALUES (a), (b), (c)` inserts none of them, and a failed
-statement inside an explicit transaction does not silently abandon the statements
-around it.
+failed `INSERT INTO ... VALUES (a), (b), (c)` inserts none of them, wherever it
+runs: inside an explicit transaction it is rolled back to where it started, and
+the statements around it stay as they were.
 
 `BEGIN`, `COMMIT` and `ROLLBACK` are the exception: they *are* transaction control,
 so they talk to the database directly rather than being wrapped in it.

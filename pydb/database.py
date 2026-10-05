@@ -34,11 +34,12 @@ from typing import Callable, Iterator
 
 from pydb.btree import BTree
 from pydb.buffer_pool import DEFAULT_CAPACITY, BufferPool
+from pydb.errors import PydbError
 from pydb.pager import META_SLOT_ROOT, NULL_PAGE_ID
 from pydb.wal import Wal
 
 
-class TransactionError(Exception):
+class TransactionError(PydbError):
     """A transaction was used in a way the state machine does not allow."""
 
 
@@ -72,9 +73,11 @@ class Database:
         self.path = self.pager.path
         self.transactions = 0  # how many have been started, ever
         self.rollbacks = 0
+        self.statement_rollbacks = 0
 
         self._lock = threading.Lock()
         self._owner: int | None = None  # thread id inside the transaction
+        self._in_statement = False  # an autocommit block is running
         self._trees: dict[int, BTree] = {}  # meta slot -> the tree rooted there
         self._rollback_hooks: list[Callable[[], None]] = []
         self._closed = False
@@ -142,9 +145,7 @@ class Database:
         self._require_mine("roll back")
         try:
             self.wal.rollback()
-            self._resync_trees()
-            for hook in self._rollback_hooks:
-                hook()
+            self._rederive()
             self.rollbacks += 1
         finally:
             self._release()
@@ -167,16 +168,41 @@ class Database:
 
     @contextmanager
     def autocommit(self) -> Iterator["Database"]:
-        """Like `transaction()`, but does nothing if one is already open.
+        """Make a block atomic, as its own transaction or inside the open one.
 
-        This is what a statement wraps itself in: run alone it is its own
-        transaction, run inside `BEGIN ... COMMIT` it is part of that one.
+        This is what a statement wraps itself in. Run alone it is its own
+        transaction. Run inside `BEGIN ... COMMIT` it is part of that one, and if
+        it raises, only its own changes are undone and the transaction carries on
+        as it stood before the statement -- SQL's statement-level atomicity.
+
+        Without that, an `UPDATE` that hit a duplicate key on its third row would
+        leave its first two rows changed, and the next `COMMIT` would keep them.
+
+        Nested blocks join the outermost one: a statement is the unit, not every
+        catalog call inside it.
         """
-        if self._owner == threading.get_ident():
+        if self._owner != threading.get_ident():
+            with self.transaction():
+                self._in_statement = True
+                try:
+                    yield self
+                finally:
+                    self._in_statement = False
+            return
+        if self._in_statement:
             yield self
             return
-        with self.transaction():
+        savepoint = self.wal.savepoint()
+        self._in_statement = True
+        try:
             yield self
+        except BaseException:
+            self.wal.rollback_to(savepoint)
+            self._rederive()
+            self.statement_rollbacks += 1
+            raise
+        finally:
+            self._in_statement = False
 
     # ------------------------------------------------------------------
     # storage
@@ -249,13 +275,19 @@ class Database:
     # ------------------------------------------------------------------
 
     def add_rollback_hook(self, hook: Callable[[], None]) -> None:
-        """Register something to run after every rollback.
+        """Register something to run after every rollback, whole or one statement's.
 
         Anything above this layer that caches a page id -- a table's index root, a
         heap's page chain -- is holding a value a rollback can invalidate, and has
         to re-read it from the file. This is where it gets told to.
         """
         self._rollback_hooks.append(hook)
+
+    def _rederive(self) -> None:
+        """After any rollback, re-read everything that was derived from the file."""
+        self._resync_trees()
+        for hook in self._rollback_hooks:
+            hook()
 
     def _resync_trees(self) -> None:
         """Point every open tree back at the root the rollback restored.

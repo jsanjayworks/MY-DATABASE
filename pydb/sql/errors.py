@@ -2,9 +2,17 @@
 
 from __future__ import annotations
 
+from pydb.errors import PydbError
 
-class SqlError(Exception):
-    """Base class for everything wrong with a statement."""
+
+class SqlError(PydbError):
+    """Base class for statements the SQL layer itself rejects.
+
+    Not every failed statement raises one. A duplicate key or a NOT NULL column
+    is found further down, and raises that layer's own error -- which cannot
+    subclass this one without a lower layer importing from a higher one. Catch
+    `PydbError` for "the statement failed, for whatever reason".
+    """
 
 
 class ParseError(SqlError):

@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from enum import IntEnum
 from typing import Iterator, Sequence
 
+from pydb.errors import PydbError
+
 INT_FORMAT = ">q"  # 8-byte signed, so it can hold any SQLite-ish INTEGER
 INT_SIZE = struct.calcsize(INT_FORMAT)
 INT_MIN = -(2**63)
@@ -28,7 +30,7 @@ TEXT_LEN_SIZE = struct.calcsize(TEXT_LEN_FORMAT)
 TEXT_MAX_LEN = 2**16 - 1
 
 
-class RecordError(Exception):
+class RecordError(PydbError):
     """Base class for schema and encoding errors."""
 
 

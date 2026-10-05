@@ -22,6 +22,7 @@ from __future__ import annotations
 from typing import Iterator, NamedTuple, Sequence
 
 from pydb.buffer_pool import BufferPool
+from pydb.errors import PydbError
 from pydb.pager import NULL_PAGE_ID, PAGE_SIZE
 from pydb.record import Schema
 from pydb.slotted_page import MAX_ROW_SIZE, SLOT_SIZE, NoRoomError, SlottedPage
@@ -30,7 +31,7 @@ from pydb.slotted_page import MAX_ROW_SIZE, SLOT_SIZE, NoRoomError, SlottedPage
 FREE_SPACE_THRESHOLD = PAGE_SIZE // 16
 
 
-class HeapError(Exception):
+class HeapError(PydbError):
     """Base class for heap file errors."""
 
 

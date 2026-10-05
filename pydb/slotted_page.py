@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import struct
 
+from pydb.errors import PydbError
 from pydb.pager import PAGE_SIZE
 
 # page_type, reserved, slot_count, free_end, live_count, next_page
@@ -49,7 +50,7 @@ DEAD_SLOT = (0, 0)
 MAX_ROW_SIZE = PAGE_SIZE - HEADER_SIZE - SLOT_SIZE
 
 
-class SlottedPageError(Exception):
+class SlottedPageError(PydbError):
     """The page's own bytes are inconsistent, or a slot index is wrong."""
 
 
